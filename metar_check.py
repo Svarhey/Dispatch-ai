@@ -1,9 +1,27 @@
 import requests
 import streamlit as st
+import math
+import csv
+from io import StringIO
 from datetime import datetime, timezone, timedelta
 
-def get_airport_data(icao_code, label):
-    """Wetter über AviationWeather.gov, NOTAMs direkt über die US FAA (mit Session-Bypass)"""
+# --- NEU: RUNWAY DATENBANK ---
+# @st.cache_data sagt der App: "Lade diese riesige Datei nur 1x pro Tag herunter und merk sie dir, damit die App blitzschnell bleibt!"
+@st.cache_data(ttl=86400)
+def load_runway_database():
+    url = "https://davidmegginson.github.io/ourairports-data/runways.csv"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        reader = csv.DictReader(StringIO(response.text))
+        # Wir filtern direkt alle geschlossenen Bahnen heraus
+        return [row for row in reader if row['closed'] == '0']
+    except Exception as e:
+        st.error("Konnte weltweite Runway-Datenbank nicht laden.")
+        return []
+
+def get_airport_data(icao_code, label, all_runways):
+    """Wetter, NOTAMs und vollautomatische Runway-Analyse"""
     metar_url = f"https://aviationweather.gov/api/data/metar?ids={icao_code}&format=json"
     taf_url = f"https://aviationweather.gov/api/data/taf?ids={icao_code}&format=json"
     
@@ -27,6 +45,70 @@ def get_airport_data(icao_code, label):
             else:
                 st.success(f"✅ METAR aktuell (Beobachtung vor {int(age.total_seconds() // 60)} Min)")
                 st.code(metar_raw, language="text")
+                
+            # --- NEU: AUTOMATISCHER RUNWAY-SCANNER ---
+            wdir = metar_data[0].get("wdir")
+            wspd = metar_data[0].get("wspd")
+            wgst = metar_data[0].get("wgst") 
+            
+            if wdir and wspd and isinstance(wdir, (int, float)):
+                st.markdown("**🌬️ Automatische Runway Wind-Analyse**")
+                
+                # Suchen des Platzes in der großen Datenbank
+                airport_runways = [r for r in all_runways if r['airport_ident'].upper() == icao_code.upper()]
+                
+                if not airport_runways:
+                    st.warning("Keine Infrastruktur-Daten für diesen ICAO-Code in der Datenbank gefunden.")
+                else:
+                    results = []
+                    for rwy in airport_runways:
+                        # Wir lesen beide Enden der Bahn aus (z.B. 07L und 25R)
+                        ends = [
+                            (rwy.get('le_ident'), rwy.get('le_heading_degT')),
+                            (rwy.get('he_ident'), rwy.get('he_heading_degT'))
+                        ]
+                        
+                        for rwy_id, rwy_hdg_str in ends:
+                            if rwy_id:
+                                # Falls das True Heading in der Datenbank fehlt, schätzen wir es anhand des Designators (z.B. RWY 25 -> 250°)
+                                rwy_hdg = float(rwy_hdg_str) if rwy_hdg_str else int(''.join(filter(str.isdigit, rwy_id))) * 10
+                                
+                                angle = math.radians(wdir - rwy_hdg)
+                                headwind = wspd * math.cos(angle)
+                                crosswind = wspd * math.sin(angle)
+                                
+                                results.append({
+                                    "rwy": rwy_id,
+                                    "headwind": headwind,
+                                    "crosswind": crosswind,
+                                    "hdg": rwy_hdg
+                                })
+                    
+                    # Sortieren, sodass die Bahnen mit dem meisten Headwind ganz oben stehen
+                    results = sorted(results, key=lambda x: x['headwind'], reverse=True)
+                    
+                    # Ausgabe generieren
+                    for res in results:
+                        hw = res['headwind']
+                        cw = res['crosswind']
+                        
+                        hw_str = f"⬇️ Head: {abs(hw):.1f} kt" if hw >= 0 else f"⬆️ Tail: {abs(hw):.1f} kt"
+                        cw_dir = "v. Rechts" if cw > 0 else "v. Links"
+                        cw_str = f"⬅️ Cross: {abs(cw):.1f} kt ({cw_dir})"
+                        
+                        # Optische Ampel: Headwind = Grün, Tailwind = Rot
+                        if hw >= 0:
+                            st.success(f"**RWY {res['rwy']}** | {hw_str} | {cw_str}")
+                        else:
+                            st.error(f"**RWY {res['rwy']}** | {hw_str} | {cw_str}")
+                            
+                    if wgst:
+                         st.warning(f"⚠️ Böenwarnung (Gusts bis {wgst} kt)! Addiere Böen-Faktor auf das Final Approach Speed gemäß FCOM.")
+                         
+            elif wdir == "VRB":
+                st.info("🌬️ Wind ist variabel (VRB). Crosswind-Berechnung nicht möglich.")
+            # ----------------------------------------
+
         else:
             st.warning(f"Kein METAR für {icao_code} verfügbar.")
 
@@ -39,50 +121,35 @@ def get_airport_data(icao_code, label):
         else:
             st.info(f"Kein TAF für {icao_code} publiziert.")
             
-        # 3. NOTAM Logik (NEU: FAA Direct Request mit Session-Cookie Bypass)
+        # 3. NOTAM Logik (FAA Direct Request)
         st.info("📋 NOTAMs (Auszug der ersten 5 Meldungen):")
         
         try:
-            # Wir erstellen eine "Session", damit Python sich Cookies merken kann
             session = requests.Session()
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            
-            # Schritt 1: Wir besuchen die Hauptseite, um das Cookie abzugreifen
+            headers = {"User-Agent": "Mozilla/5.0"}
             session.get("https://notams.aim.faa.gov/notamSearch/", headers=headers, timeout=5)
             
-            # Schritt 2: Die eigentliche Abfrage mit dem neuen Cookie
             faa_url = "https://notams.aim.faa.gov/notamSearch/search"
-            payload = {
-                "searchType": 0,
-                "designatorsForLocation": icao_code.upper()
-            }
+            payload = {"searchType": 0, "designatorsForLocation": icao_code.upper()}
             
             notam_res = session.post(faa_url, data=payload, headers=headers, timeout=10)
             
             if notam_res.status_code == 200:
                 notam_data = notam_res.json()
-                
-                # Wenn der Server ein echtes Error-Feld schickt (und es nicht leer ist!)
                 if "error" in notam_data and notam_data["error"] != "":
                     st.warning(f"FAA System meldet: {notam_data['error']}")
                 elif "notamList" in notam_data and len(notam_data["notamList"]) > 0:
                     notams = notam_data["notamList"]
                     for notam in notams[:5]:
-                        notam_text = notam.get("icaoMessage", notam.get("traditionalMessage", "Fehler: Text nicht auslesbar."))
-                        st.code(notam_text, language="text")
-                    
+                        st.code(notam.get("icaoMessage", notam.get("traditionalMessage", "")), language="text")
                     if len(notams) > 5:
-                        st.caption(f"... und {len(notams) - 5} weitere NOTAMs aktiv. (Auf 5 limitiert in der UI)")
+                        st.caption(f"... und {len(notams) - 5} weitere NOTAMs aktiv.")
                 else:
                     st.success("Keine aktiven NOTAMs für diesen Platz gefunden.")
             else:
-                st.error(f"Fehler beim NOTAM-Abruf via FAA. (HTTP Code: {notam_res.status_code})")
-                
+                st.error(f"Fehler beim NOTAM-Abruf via FAA.")
         except Exception as e:
-            st.error(f"Verbindungsfehler zur FAA-Datenbank: {e}")
+            st.error("Verbindungsfehler zur FAA-Datenbank.")
             
         st.markdown("---")
 
@@ -95,6 +162,9 @@ st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
 
 st.title("✈️ Dispatch-AI")
 st.subheader("Professional Pre-Flight Briefing Tool")
+
+# Die Runway-Datenbank wird einmalig im Hintergrund geladen
+all_runways = load_runway_database()
 
 col1, col2, col3 = st.columns(3)
 
@@ -109,10 +179,11 @@ with col3:
 
 if st.button("Briefing erstellen"):
     if dep_icao:
-        get_airport_data(dep_icao, "DEPARTURE")
+        # Wir übergeben die geladene Datenbank nun an die Funktion
+        get_airport_data(dep_icao, "DEPARTURE", all_runways)
         if dest_icao:
-            get_airport_data(dest_icao, "DESTINATION")
+            get_airport_data(dest_icao, "DESTINATION", all_runways)
         if altn_icao:
-            get_airport_data(altn_icao, "ALTERNATE (ALTN)")
+            get_airport_data(altn_icao, "ALTERNATE (ALTN)", all_runways)
     else:
         st.warning("Bitte gib mindestens den Departure Airport (DEP) ein, um die Abfrage zu starten.")
