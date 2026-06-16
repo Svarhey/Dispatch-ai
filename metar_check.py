@@ -53,7 +53,7 @@ def fetch_flight_metadata(flight_number, flight_date, api_key):
             else:
                 return {"success": False, "error": f"API lieferte Daten, aber keine ICAO-Codes für DEP/DEST."}
         else:
-            return {"success": False, "error": f"HTTP Code {res.status_code}: Flug für {date_str} nicht gefunden oder API-Abo nicht aktiv."}
+            return {"success": False, "error": f"HTTP Code {res.status_code}: Flug für {date_str} nicht gefunden."}
     except Exception as e:
         return {"success": False, "error": f"Verbindungsfehler zur API: {str(e)}"}
 
@@ -67,20 +67,20 @@ def fetch_raw_data(icao_code, label, all_runways):
         metar_res = requests.get(metar_url)
         metar_data = metar_res.json()
         if len(metar_data) > 0:
-            raw_text += f"METAR: {metar_data[0].get('rawOb')}\n"
+            raw_text += f"ORIGINAL_METAR: {metar_data[0].get('rawOb')}\n"
             wdir = metar_data[0].get("wdir")
             wspd = metar_data[0].get("wspd")
             if wdir and wspd and isinstance(wdir, (int, float)):
                 raw_text += f"WIND DATA: {wdir} degrees at {wspd} knots.\n"
         else:
-            raw_text += "METAR: None available.\n"
+            raw_text += "ORIGINAL_METAR: None available.\n"
 
         taf_res = requests.get(taf_url)
         taf_data = taf_res.json()
         if len(taf_data) > 0:
-            raw_text += f"TAF: {taf_data[0].get('rawTAF')}\n"
+            raw_text += f"ORIGINAL_TAF: {taf_data[0].get('rawTAF')}\n"
         else:
-            raw_text += "TAF: None published.\n"
+            raw_text += "ORIGINAL_TAF: None published.\n"
             
         session = requests.Session()
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -107,6 +107,7 @@ def generate_ai_briefing(raw_data, flight_meta, api_key):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
+    # NEU: Strengere Regeln für die Ausgabe der Rohdaten direkt im Briefing
     prompt = f"""
     Du bist 'Dispatch-AI', ein professioneller, präziser Flight Dispatch Assistant für Lufthansa-Piloten.
     Deine Aufgabe ist es, aus den folgenden Rohdaten ein extrem klares, operationell sinnvolles Executive Pre-Flight Briefing auf Deutsch zu erstellen.
@@ -116,9 +117,13 @@ def generate_ai_briefing(raw_data, flight_meta, api_key):
     - Geplantes Flugzeug (Tail): {flight_meta.get('tail', 'UNKNOWN')}
     - Status/Verspätung: {flight_meta.get('delay', 'No Data')}
     
-    Regeln:
+    Regeln für die Struktur des Briefings:
     1. Beginne mit einer kurzen 'Executive Summary' zum Flug (Flugnummer, Flugzeug-Registrierung und eventuelle Verspätungen).
-    2. Fasse das Wetter für DEP, DEST und alle Alternates verständlich zusammen. Hebe Gefahren (CB, TS, Icing, starke Crosswinds) deutlich hervor.
+    2. Erstelle für jeden Flughafen (DEP, DEST und alle ALTN) eine eigene Sektion. 
+       WICHTIGSTE REGEL FÜR JEDEN FLUGHAFEN:
+       - Blende als ALLERERSTES das originale, unveränderte 'ORIGINAL_METAR' und 'ORIGINAL_TAF' exakt so wie es im Text steht in einem Markdown-Code-Block (```text ... ```) ein.
+       - Schreibe DIREKT ERST DARUNTER deine verständliche Übersetzung und Interpretation für diesen Platz.
+       - Hebe meteorologische Gefahren (CB, TS, Icing, starke Crosswinds) deutlich hervor.
     3. Filtere die NOTAMs kritisch. Konzentriere dich auf geschlossene Bahnen, fehlende ILS/Navaids, Taxiway-Sperrungen und operationelle Einschränkungen.
     4. Erstelle am Ende einen Abschnitt "Threat & Error Management (TEM) / Operationelles Takeaway" mit den 2-3 größten Herausforderungen für die Crew.
     
@@ -145,7 +150,7 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# NEU: Spalten für Flugnummer UND Datum
+# Spalten für Flugnummer UND Datum
 col_fn, col_date = st.columns(2)
 with col_fn:
     flight_input = st.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
@@ -178,7 +183,6 @@ if st.button("Executive Briefing erstellen"):
                 flight_meta["delay"] = track_res["delay"]
                 st.success(f"✈️ Flug gefunden: {flight_meta['dep']} ➡️ {flight_meta['dest']} | Aircraft: {flight_meta['tail']}")
             else:
-                # NEU: Exakte Ausgabe der API-Fehlermeldung!
                 st.warning(f"⚠️ Tracking fehlgeschlagen: {track_res['error']}")
         
         if not flight_meta["dep"] or not flight_meta["dest"]:
