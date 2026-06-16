@@ -19,48 +19,43 @@ def load_runway_database():
         return []
 
 # --- TRACKING API: FLUGDATEN ABRUFEN (AeroDataBox) ---
-def fetch_flight_metadata(flight_number, api_key):
-    """Holt DEP, DEST, Tailsign und Delays basierend auf der Flugnummer"""
-    # Wir säubern die Flugnummer (z.B. LH400 -> LH 400 oder DLH400 je nach API-Standard)
-    # AeroDataBox erwartet meist das Format 'LH 400' oder die reine Nummer mit Airline-Code
+def fetch_flight_metadata(flight_number, flight_date, api_key):
+    """Holt DEP, DEST, Tailsign und Delays basierend auf Flugnummer und Datum"""
     flight_clean = flight_number.replace(" ", "").upper()
+    date_str = flight_date.strftime("%Y-%m-%d")
     
-    url = f"https://aerodatabox.p.rapidapi.com/flights/number/{flight_clean}"
+    url = f"https://aerodatabox.p.rapidapi.com/flights/number/{flight_clean}/{date_str}"
     headers = {
         "X-RapidAPI-Key": api_key,
         "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com"
     }
     
-    # Da die API das aktuelle Datum braucht, nehmen wir das heutige UTC-Datum
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    params = {"withLocation": "false", "withAircraftImage": "false"}
-    
     try:
-        # AeroDataBox verlangt oft das Datum im Pfad, falls der Direktaufruf fehlschlägt, nutzen wir einen Fallback
-        res = requests.get(f"{url}/{today}", headers=headers, params=params, timeout=7)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200 and len(res.json()) > 0:
-            flight_data = res.json()[0] # Wir nehmen den aktuellsten Flug des Tages
+            flight_data = res.json()[0] 
             
             dep = flight_data.get("departure", {}).get("airport", {}).get("icao")
             dest = flight_data.get("arrival", {}).get("airport", {}).get("icao")
             tail = flight_data.get("aircraft", {}).get("reg", "UNKNOWN TAIL")
             
-            # Verspätungsberechnung (sofern Daten vorhanden)
             dep_delay = flight_data.get("departure", {}).get("delayMinutes", 0)
             arr_delay = flight_data.get("arrival", {}).get("delayMinutes", 0)
             
-            return {
-                "success": True,
-                "dep": dep,
-                "dest": dest,
-                "tail": tail,
-                "delay": f"DEP Delay: {dep_delay}min / ARR Delay: {arr_delay}min" if (dep_delay or arr_delay) else "On Time"
-            }
+            if dep and dest:
+                return {
+                    "success": True,
+                    "dep": dep,
+                    "dest": dest,
+                    "tail": tail,
+                    "delay": f"DEP Delay: {dep_delay}min / ARR Delay: {arr_delay}min" if (dep_delay or arr_delay) else "On Time"
+                }
+            else:
+                return {"success": False, "error": f"API lieferte Daten, aber keine ICAO-Codes für DEP/DEST."}
+        else:
+            return {"success": False, "error": f"HTTP Code {res.status_code}: Flug für {date_str} nicht gefunden oder API-Abo nicht aktiv."}
     except Exception as e:
-        pass
-        
-    # Smaarter Fallback für den Testmodus (Falls API-Key noch fehlt oder Flug für heute noch nicht aktiv ist)
-    return {"success": False, "error": "Flugdaten konnten nicht automatisch geladen werden."}
+        return {"success": False, "error": f"Verbindungsfehler zur API: {str(e)}"}
 
 # --- DATEN SAMMLER (Wetter, NOTAMs, Runways) ---
 def fetch_raw_data(icao_code, label, all_runways):
@@ -112,7 +107,6 @@ def generate_ai_briefing(raw_data, flight_meta, api_key):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
-    # Wir füttern das Modell nun AUCH mit den echten Flugzeugdaten!
     prompt = f"""
     Du bist 'Dispatch-AI', ein professioneller, präziser Flight Dispatch Assistant für Lufthansa-Piloten.
     Deine Aufgabe ist es, aus den folgenden Rohdaten ein extrem klares, operationell sinnvolles Executive Pre-Flight Briefing auf Deutsch zu erstellen.
@@ -144,7 +138,6 @@ st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
 st.title("✈️ Dispatch-AI")
 st.subheader("Professional AI-Powered Pre-Flight Briefing")
 
-# Passwort/Key Check aus den Secrets
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 rapid_key = st.secrets.get("RAPIDAPI_KEY")
 
@@ -152,10 +145,13 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# Das neue, cleane Eingabe-Layout fürs iPhone
-flight_input = st.text_input("Flugnummer eingeben (z.B. LH400, LH2012):", placeholder="LH400").upper()
+# NEU: Spalten für Flugnummer UND Datum
+col_fn, col_date = st.columns(2)
+with col_fn:
+    flight_input = st.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
+with col_date:
+    flight_date = st.date_input("Flugdatum:", datetime.now().date())
 
-# NEU: Das aufklappbare Menü für bis zu 4 optionale Alternates
 with st.expander("➕ Optionale Alternates hinzufügen (bis zu 4 Plätze)", expanded=False):
     alt_col1, alt_col2, alt_col3, alt_col4 = st.columns(4)
     with alt_col1:
@@ -171,24 +167,22 @@ if st.button("Executive Briefing erstellen"):
     if flight_input:
         flight_meta = {"fn": flight_input, "tail": "UNKNOWN", "delay": "On Time", "dep": None, "dest": None}
         
-        # 1. Flugtracking-Daten abrufen (falls Key vorhanden)
         if rapid_key:
-            st.info(f"🔍 Tracke Flug {flight_input} via AeroDataBox...")
-            track_res = fetch_flight_metadata(flight_input, rapid_key)
-            if track_res["success"] and track_res["dep"] and track_res["dest"]:
+            st.info(f"🔍 Tracke Flug {flight_input} für den {flight_date.strftime('%d.%m.%Y')} via AeroDataBox...")
+            track_res = fetch_flight_metadata(flight_input, flight_date, rapid_key)
+            
+            if track_res["success"]:
                 flight_meta["dep"] = track_res["dep"]
                 flight_meta["dest"] = track_res["dest"]
                 flight_meta["tail"] = track_res["tail"]
                 flight_meta["delay"] = track_res["delay"]
                 st.success(f"✈️ Flug gefunden: {flight_meta['dep']} ➡️ {flight_meta['dest']} | Aircraft: {flight_meta['tail']}")
             else:
-                st.warning("⚠️ Flugnummer nicht aktiv oder API-Limit erreicht. Nutze manuellen Fallback-Modus.")
+                # NEU: Exakte Ausgabe der API-Fehlermeldung!
+                st.warning(f"⚠️ Tracking fehlgeschlagen: {track_res['error']}")
         
-        # Fallback-Modus, falls das Tracking fehlschlägt (damit die App niemals abstürzt)
         if not flight_meta["dep"] or not flight_meta["dest"]:
             st.error("Konnte Route nicht automatisch bestimmen.")
-            st.info("💡 Tipp: Wenn der Flugplan für heute noch nicht von der API publiziert wurde, gib die Route bitte kurz manuell ein.")
-            # Ermöglicht manuelles Überschreiben, falls der Server offline ist
             manual_dep = st.text_input("Manueller DEP (ICAO):", max_chars=4, key="m_dep").upper()
             manual_dest = st.text_input("Manueller DEST (ICAO):", max_chars=4, key="m_dest").upper()
             if manual_dep and manual_dest:
@@ -197,19 +191,16 @@ if st.button("Executive Briefing erstellen"):
             else:
                 st.stop()
 
-        # 2. Operative Umweltdaten sammeln (Wetter & NOTAMs)
         st.info("📡 Sammle meteorologische Daten und NOTAMs...")
         all_runways = load_runway_database()
         
         combined_raw_data = fetch_raw_data(flight_meta["dep"], "DEPARTURE (DEP)", all_runways)
         combined_raw_data += fetch_raw_data(flight_meta["dest"], "DESTINATION (DEST)", all_runways)
         
-        # Die aktiven Alternates dynamisch scannen
         for idx, altn in enumerate([altn1, altn2, altn3, altn4], start=1):
             if altn:
                 combined_raw_data += fetch_raw_data(altn, f"ALTERNATE {idx} (ALTN)", all_runways)
                 
-        # 3. Das Paket an Gemini übergeben
         briefing_output = generate_ai_briefing(combined_raw_data, flight_meta, gemini_key)
         
         st.markdown("---")
