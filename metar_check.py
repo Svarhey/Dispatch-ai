@@ -66,7 +66,7 @@ def fetch_raw_data(icao_code, label, all_runways):
 # --- KI BRIEFING GENERATOR ---
 def generate_ai_briefing(raw_data, api_key):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
     
     prompt = f"""
     Du bist 'Dispatch-AI', ein professioneller, präziser Flight Dispatch Assistant für Piloten.
