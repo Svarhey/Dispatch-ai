@@ -107,7 +107,6 @@ def generate_ai_briefing(raw_data, flight_meta, api_key):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
-    # NEU: Strengere Regeln für die Ausgabe der Rohdaten direkt im Briefing
     prompt = f"""
     Du bist 'Dispatch-AI', ein professioneller, präziser Flight Dispatch Assistant für Lufthansa-Piloten.
     Deine Aufgabe ist es, aus den folgenden Rohdaten ein extrem klares, operationell sinnvolles Executive Pre-Flight Briefing auf Deutsch zu erstellen.
@@ -207,7 +206,23 @@ if st.button("Executive Briefing erstellen"):
                 
         briefing_output = generate_ai_briefing(combined_raw_data, flight_meta, gemini_key)
         
+        # --- NEU: TABS FÜR KI UND ROHDATEN ---
         st.markdown("---")
-        st.markdown(briefing_output)
+        tab1, tab2 = st.tabs(["🤖 AI Executive Briefing", "📡 API Rohdaten"])
+        
+        with tab1:
+            # Hier landet das formatierte KI-Ergebnis
+            st.markdown(briefing_output)
+            
+        with tab2:
+            # Hier landen die ungefilterten Metadaten und der komplette Text-Dump der APIs
+            st.info("Dieser Bereich zeigt die ungefilterten Daten aller angebundenen APIs (AviationWeather, FAA NOTAMs, AeroDataBox). Dies ist exakt das Datenpaket, welches die KI zur Analyse erhält.")
+            
+            st.markdown("### ✈️ Flug & Tracking Metadaten")
+            st.json(flight_meta)
+            
+            st.markdown("### 🌤️ Wetter & 📋 NOTAMs")
+            st.code(combined_raw_data, language="text")
+
     else:
         st.warning("Bitte gib eine Flugnummer ein.")
