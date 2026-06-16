@@ -2,6 +2,7 @@ import requests
 import streamlit as st
 import math
 import csv
+import google.generativeai as genai
 from io import StringIO
 from datetime import datetime, timezone, timedelta
 
@@ -14,166 +15,120 @@ def load_runway_database():
         response.raise_for_status()
         reader = csv.DictReader(StringIO(response.text))
         return [row for row in reader if row['closed'] == '0']
-    except Exception as e:
-        st.error("Konnte weltweite Runway-Datenbank nicht laden.")
+    except:
         return []
 
-def get_airport_data(icao_code, label, all_runways):
-    """Wetter, unlimitierte NOTAMs und automatische Runway-Analyse"""
+# --- DATEN SAMMLER ---
+def fetch_raw_data(icao_code, label, all_runways):
     metar_url = f"https://aviationweather.gov/api/data/metar?ids={icao_code}&format=json"
     taf_url = f"https://aviationweather.gov/api/data/taf?ids={icao_code}&format=json"
-    
-    st.markdown(f"### 📍 {label}: {icao_code.upper()}")
+    raw_text = f"\n--- {label}: {icao_code.upper()} ---\n"
     
     try:
-        # 1. METAR Logik & CROSSWIND CALCULATOR
         metar_res = requests.get(metar_url)
         metar_data = metar_res.json()
-        
         if len(metar_data) > 0:
-            metar_raw = metar_data[0].get("rawOb")
-            obs_time_raw = metar_data[0].get("obsTime")
-            obs_time_dt = datetime.fromtimestamp(obs_time_raw, tz=timezone.utc)
-            now_utc = datetime.now(timezone.utc)
-            age = now_utc - obs_time_dt
-            
-            if age > timedelta(hours=3):
-                st.error(f"⚠️ METAR VERWORFEN (Alter: {int(age.total_seconds() // 3600)}h)")
-                st.code(metar_raw, language="text")
-            else:
-                st.success(f"✅ METAR aktuell (Beobachtung vor {int(age.total_seconds() // 60)} Min)")
-                st.code(metar_raw, language="text")
-                
-            # AUTOMATISCHER RUNWAY-SCANNER
+            raw_text += f"METAR: {metar_data[0].get('rawOb')}\n"
             wdir = metar_data[0].get("wdir")
             wspd = metar_data[0].get("wspd")
-            wgst = metar_data[0].get("wgst") 
-            
             if wdir and wspd and isinstance(wdir, (int, float)):
-                st.markdown("**🌬️ Automatische Runway Wind-Analyse**")
-                
-                airport_runways = [r for r in all_runways if r['airport_ident'].upper() == icao_code.upper()]
-                
-                if not airport_runways:
-                    st.warning("Keine Infrastruktur-Daten für diesen ICAO-Code in der Datenbank gefunden.")
-                else:
-                    results = []
-                    for rwy in airport_runways:
-                        ends = [
-                            (rwy.get('le_ident'), rwy.get('le_heading_degT')),
-                            (rwy.get('he_ident'), rwy.get('he_heading_degT'))
-                        ]
-                        
-                        for rwy_id, rwy_hdg_str in ends:
-                            if rwy_id:
-                                rwy_hdg = float(rwy_hdg_str) if rwy_hdg_str else int(''.join(filter(str.isdigit, rwy_id))) * 10
-                                
-                                angle = math.radians(wdir - rwy_hdg)
-                                headwind = wspd * math.cos(angle)
-                                crosswind = wspd * math.sin(angle)
-                                
-                                results.append({
-                                    "rwy": rwy_id,
-                                    "headwind": headwind,
-                                    "crosswind": crosswind,
-                                    "hdg": rwy_hdg
-                                })
-                    
-                    results = sorted(results, key=lambda x: x['headwind'], reverse=True)
-                    
-                    for res in results:
-                        hw = res['headwind']
-                        cw = res['crosswind']
-                        
-                        hw_str = f"⬇️ Head: {abs(hw):.1f} kt" if hw >= 0 else f"⬆️ Tail: {abs(hw):.1f} kt"
-                        cw_dir = "v. Rechts" if cw > 0 else "v. Links"
-                        cw_str = f"⬅️ Cross: {abs(cw):.1f} kt ({cw_dir})"
-                        
-                        if hw >= 0:
-                            st.success(f"**RWY {res['rwy']}** | {hw_str} | {cw_str}")
-                        else:
-                            st.error(f"**RWY {res['rwy']}** | {hw_str} | {cw_str}")
-                            
-                    if wgst:
-                         st.warning(f"⚠️ Böenwarnung (Gusts bis {wgst} kt)! Addiere Böen-Faktor auf das Final Approach Speed gemäß FCOM.")
-                         
-            elif wdir == "VRB":
-                st.info("🌬️ Wind ist variabel (VRB). Crosswind-Berechnung nicht möglich.")
-
+                raw_text += f"WIND DATA: {wdir} degrees at {wspd} knots.\n"
         else:
-            st.warning(f"Kein METAR für {icao_code} verfügbar.")
+            raw_text += "METAR: None available.\n"
 
-        # 2. TAF Logik
         taf_res = requests.get(taf_url)
         taf_data = taf_res.json()
         if len(taf_data) > 0:
-            st.info("🔮 TAF:")
-            st.code(taf_data[0].get("rawTAF"), language="text")
+            raw_text += f"TAF: {taf_data[0].get('rawTAF')}\n"
         else:
-            st.info(f"Kein TAF für {icao_code} publiziert.")
+            raw_text += "TAF: None published.\n"
             
-        # 3. NOTAM Logik (FAA Direct Request - Unlimitiert)
-        st.info("📋 Aktuelle NOTAMs:")
+        session = requests.Session()
+        headers = {"User-Agent": "Mozilla/5.0"}
+        session.get("https://notams.aim.faa.gov/notamSearch/", headers=headers, timeout=5)
+        faa_url = "https://notams.aim.faa.gov/notamSearch/search"
+        notam_res = session.post(faa_url, data={"searchType": 0, "designatorsForLocation": icao_code.upper()}, headers=headers, timeout=10)
         
-        try:
-            session = requests.Session()
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-            session.get("https://notams.aim.faa.gov/notamSearch/", headers=headers, timeout=5)
-            
-            faa_url = "https://notams.aim.faa.gov/notamSearch/search"
-            payload = {"searchType": 0, "designatorsForLocation": icao_code.upper()}
-            
-            notam_res = session.post(faa_url, data=payload, headers=headers, timeout=10)
-            
-            if notam_res.status_code == 200:
-                notam_data = notam_res.json()
-                if "error" in notam_data and notam_data["error"] != "":
-                    st.warning(f"FAA System meldet: {notam_data['error']}")
-                elif "notamList" in notam_data and len(notam_data["notamList"]) > 0:
-                    notams = notam_data["notamList"]
-                    
-                    # NEU: Aufklappbares Menü für alle NOTAMs, um das Layout sauber zu halten
-                    with st.expander(f"Alle {len(notams)} aktiven NOTAMs anzeigen", expanded=False):
-                        for notam in notams: # Limitierung entfernt!
-                            st.code(notam.get("icaoMessage", notam.get("traditionalMessage", "")), language="text")
-                else:
-                    st.success("Keine aktiven NOTAMs für diesen Platz gefunden.")
+        if notam_res.status_code == 200:
+            notam_data = notam_res.json()
+            if "notamList" in notam_data and len(notam_data["notamList"]) > 0:
+                raw_text += "NOTAMS:\n"
+                for notam in notam_data["notamList"]:
+                    raw_text += f"- {notam.get('icaoMessage', notam.get('traditionalMessage', ''))}\n"
             else:
-                st.error(f"Fehler beim NOTAM-Abruf via FAA.")
-        except Exception as e:
-            st.error("Verbindungsfehler zur FAA-Datenbank.")
-            
-        st.markdown("---")
-
+                raw_text += "NOTAMS: None active.\n"
+                
     except Exception as e:
-        st.error(f"Fehler bei Abfrage {icao_code}: {e}")
+        raw_text += f"Fehler beim Datenabruf: {e}\n"
+        
+    return raw_text
+
+# --- KI BRIEFING GENERATOR ---
+def generate_ai_briefing(raw_data, api_key):
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = f"""
+    Du bist 'Dispatch-AI', ein professioneller, präziser Flight Dispatch Assistant für Piloten.
+    Deine Aufgabe ist es, aus den folgenden kryptischen Rohdaten (METAR, TAF, NOTAMs) ein extrem klares, 
+    strukturiertes und operationell sinnvolles Executive Pre-Flight Briefing auf Deutsch zu erstellen.
+    
+    Regeln:
+    1. Fasse das Wetter verständlich zusammen. Hebe Gefahren (CB, TS, SN, FZRA, Windshear, starke Crosswinds) deutlich hervor.
+    2. Filtere die NOTAMs. Lass unwichtige administrative Dinge weg. Konzentriere dich auf geschlossene Bahnen, fehlende ILS/Navaids, Taxiway-Sperrungen und operationelle Einschränkungen.
+    3. Erstelle am Ende einen kurzen Abschnitt "Threat & Error Management (TEM) / Operationelles Takeaway", in dem du die 2-3 größten Herausforderungen des Fluges auf Basis der Daten zusammenfasst.
+    4. Halluziniere keine Daten. Nutze nur das, was im Raw-Text steht. Wenn Daten fehlen, weise darauf hin.
+    
+    Hier sind die aktuellen Rohdaten des Fluges:
+    {raw_data}
+    """
+    with st.spinner('🧠 Dispatch-AI analysiert Rohdaten und schreibt Briefing...'):
+        try:
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"❌ Fehler bei der KI-Generierung. Details: {e}"
 
 # --- STREAMLIT UI OBERFLÄCHE ---
-
 st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
 
 st.title("✈️ Dispatch-AI")
-st.subheader("Professional Pre-Flight Briefing Tool")
+st.subheader("Professional AI-Powered Pre-Flight Briefing")
 
-all_runways = load_runway_database()
+# NEU: Der Tresor-Check
+# Die App schaut nach, ob der Key sicher bei Streamlit in den Einstellungen hinterlegt wurde
+if "GEMINI_API_KEY" in st.secrets:
+    gemini_key = st.secrets["GEMINI_API_KEY"]
+else:
+    # Fallback: Falls kein Key im Tresor ist, wird das alte Seitenmenü angezeigt
+    st.sidebar.header("⚙️ Systemeinstellungen")
+    st.sidebar.warning("⚠️ Kein Key im Tresor gefunden.")
+    gemini_key = st.sidebar.text_input("Gemini API Key:", type="password")
 
 col1, col2, col3 = st.columns(3)
-
 with col1:
     dep_icao = st.text_input("Departure (DEP) *Pflichtfeld*:", max_chars=4, placeholder="z.B. EDDB").upper()
-
 with col2:
     dest_icao = st.text_input("Destination (DEST) *Optional*:", max_chars=4, placeholder="z.B. EDDF").upper()
-
 with col3:
     altn_icao = st.text_input("Alternate (ALTN) *Optional*:", max_chars=4, placeholder="z.B. EDDS").upper()
 
-if st.button("Briefing erstellen"):
-    if dep_icao:
-        get_airport_data(dep_icao, "DEPARTURE", all_runways)
+if st.button("Executive Briefing generieren"):
+    if not gemini_key:
+        st.error("🔒 Bitte hinterlege einen API-Key in den Streamlit-Secrets oder links im Menü.")
+    elif dep_icao:
+        st.info("📡 Sammle Live-Daten von FAA und AviationWeather...")
+        all_runways = load_runway_database()
+        
+        combined_raw_data = fetch_raw_data(dep_icao, "DEPARTURE", all_runways)
         if dest_icao:
-            get_airport_data(dest_icao, "DESTINATION", all_runways)
+            combined_raw_data += fetch_raw_data(dest_icao, "DESTINATION", all_runways)
         if altn_icao:
-            get_airport_data(altn_icao, "ALTERNATE (ALTN)", all_runways)
+            combined_raw_data += fetch_raw_data(altn_icao, "ALTERNATE", all_runways)
+            
+        briefing_output = generate_ai_briefing(combined_raw_data, gemini_key)
+        
+        st.markdown("---")
+        st.markdown(briefing_output)
     else:
-        st.warning("Bitte gib mindestens den Departure Airport (DEP) ein, um die Abfrage zu starten.")
+        st.warning("Bitte gib mindestens den Departure Airport (DEP) ein.")
