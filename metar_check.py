@@ -6,12 +6,6 @@ import google.generativeai as genai
 from io import StringIO
 from datetime import datetime, timezone, timedelta
 
-# Sicheres Laden der Websuche, falls requirements.txt noch baut
-try:
-    from duckduckgo_search import DDGS
-except ImportError:
-    DDGS = None
-
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
 def load_runway_database():
@@ -37,8 +31,8 @@ def get_airport_city(icao_code):
         pass
     return ""
 
-# --- TRACKING & DEEP DATA API (JETZT 5 MINUTEN CACHE!) ---
-@st.cache_data(ttl=300) # 300 Sekunden = 5 Minuten
+# --- TRACKING & DEEP DATA API (5 MINUTEN CACHE) ---
+@st.cache_data(ttl=300)
 def fetch_deep_flight_data(flight_number, flight_date, api_key):
     flight_clean = flight_number.replace(" ", "").upper()
     date_str = flight_date.strftime("%Y-%m-%d")
@@ -106,7 +100,7 @@ def search_city_events(city_name, flight_date):
                 return summary
     except:
         pass
-    return f"Keine signifikanten lokalen Großereignisse für {city_name} via Kurzsuche detektiert."
+    return f"Keine signifikanten lokalen Großereignisse für {city_name} detektiert."
 
 # --- METAR / TAF / NOTAM SAMMLER ---
 def get_airport_raw_data(icao_code, label, all_runways):
@@ -127,11 +121,8 @@ def get_airport_raw_data(icao_code, label, all_runways):
     except:
         weather_info += "Wetterdaten nicht verfügbar.\n"
         
-    # --- INTELLIGENTE WINDAUSWERTUNG (Inkl. Winter Ops Logik) ---
     if wdir and wspd and isinstance(wdir, (int, float)):
         weather_info += "\n[RUNWAY WIND ANALYSIS]\n"
-        
-        # Check ob das METAR Hinweise auf Schnee, Eis oder gefrierenden Niederschlag hat
         winter_ops_active = any(code in metar_raw for code in ["SN", "FZ", "PL", "GS", "GR"])
         
         airport_runways = [r for r in all_runways if r['airport_ident'].upper() == icao_code.upper()]
@@ -147,21 +138,15 @@ def get_airport_raw_data(icao_code, label, all_runways):
                     hw_str = f"Headwind: {headwind:.1f} kt" if headwind >= 0 else f"Tailwind: {abs(headwind):.1f} kt"
                     
                     cw_alert = ""
-                    # Dynamische Schwellenwerte je nach Winter Ops
                     if winter_ops_active:
-                        if crosswind >= 20.0:
-                            cw_alert = " 🔴 ⚠️ [CRITICAL CROSSWIND ALERT >= 20KT! (WINTER OPS)]"
-                        elif crosswind >= 15.0:
-                            cw_alert = " ⚠️ [CROSSWIND ALERT >= 15KT! (WINTER OPS)]"
+                        if crosswind >= 20.0: cw_alert = " 🔴 ⚠️ [CRITICAL CROSSWIND ALERT >= 20KT! (WINTER OPS)]"
+                        elif crosswind >= 15.0: cw_alert = " ⚠️ [CROSSWIND ALERT >= 15KT! (WINTER OPS)]"
                     else:
-                        if crosswind >= 30.0:
-                            cw_alert = " 🔴 ⚠️ [CRITICAL CROSSWIND ALERT >= 30KT!]"
-                        elif crosswind >= 20.0:
-                            cw_alert = " ⚠️ [CROSSWIND ALERT >= 20KT!]"
+                        if crosswind >= 30.0: cw_alert = " 🔴 ⚠️ [CRITICAL CROSSWIND ALERT >= 30KT!]"
+                        elif crosswind >= 20.0: cw_alert = " ⚠️ [CROSSWIND ALERT >= 20KT!]"
                             
                     weather_info += f"RWY {rwy_id}: {hw_str} | Crosswind: {crosswind:.1f} kt{cw_alert}\n"
 
-    # NOTAMs
     try:
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
@@ -204,6 +189,9 @@ if st.button("Executive Briefing erstellen"):
             dep_icao = f.get("departure", {}).get("airport", {}).get("icao")
             dest_icao = f.get("arrival", {}).get("airport", {}).get("icao")
             
+            # Aktuelle UTC-Zeit für die zeitliche Einordnung der KI berechnen
+            current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            
             st.success(f"✈️ Flugplan aktiv: {dep_icao} ➡️ {dest_icao} | Aircraft Tail: {f.get('aircraft', {}).get('reg')}")
             
             dep_city = get_airport_city(dep_icao)
@@ -224,17 +212,29 @@ if st.button("Executive Briefing erstellen"):
             genai.configure(api_key=gemini_key)
             model = genai.GenerativeModel('gemini-2.5-flash')
             
-            # --- NEUER PROMPT MIT FARBVORGABE FÜR WARNUNGEN ---
+            # --- DER NEUE TEMPORAL-SMARTE SYSTEM PROMPT ---
             prompt = f"""
             Du bist 'Dispatch-AI', ein Elite-Flugdienstberater für Lufthansa-Crews.
             Erstelle ein prägnantes, hochprofessionelles Executive Pre-Flight Briefing auf Deutsch basierend auf diesen Daten.
             
-            REGELN FÜR DEIN GEHIRN:
-            1. EXECUTIVE SUMMARY: Nenne Flug, Tail, exaktes Flugzeugalter und Triebwerkstyp (falls im JSON), Parkpositionen (Gate/Stand), Verspätungen und die Verkehrsdichte bei der Landung.
-            2. WEATHER & RUNWAYS: Analysiere METAR/TAF. WICHTIG: Wenn im Block [RUNWAY WIND ANALYSIS] ein 'CROSSWIND ALERT' oder 'CRITICAL CROSSWIND ALERT' steht, musst du extrem deutlich warnen. Einen 'CRITICAL CROSSWIND ALERT' formatierst du zwingend in ROT (Nutze die Streamlit-Syntax: :red[Dein Warntext]). Besprich die operationellen Konsequenzen für die Landung/Start (besonders bei WINTER OPS)!
-            3. NOTAMs: Filtere radikal nach kritischen Faktoren (ILS-Ausfall, geschlossene Pisten).
-            4. LOCAL SECURITY & CITY LOGISTICS: Werte die Live-Websuchdaten (OSINT) aus. Warne die Crew explizit vor Marathons, Straßensperren oder Demonstrationen, die den Layover beeinträchtigen.
-            5. THREAT & ERROR MANAGEMENT (TEM): Fasse die 3 kritischsten Risiken dieses Fluges zusammen.
+            AKTUELLE ZEITRECHNUNG (WICHTIG):
+            - Aktuelle UTC-Zeit im Moment der Abfrage: {current_utc_time}
+            
+            STRENGE REGELN FÜR DIE TEMPORALE WETTERANALYSE:
+            1. ÜBERPRÜFE DIE FLUGZEITEN: Schaue im [AIRCRAFT & AIRPORT METADATA JSON] nach der geplanten Abflugszeit (`departure.scheduledTimeUtc`) und Ankunftszeit (`arrival.scheduledTimeUtc`).
+            2. RELEVANZ-FENSTER: Für das Wetter am Startflughafen (DEP) ist das Zeitfenster 'Geplanter Abflug +/- 1 Stunde' entscheidend. Für den Zielflughafen (DEST) gilt 'Geplante Ankunft +/- 1 Stunde'.
+            3. METAR VS TAF LOGIK: 
+               - Analysiere die Zeitstempel im METAR (z.B. 171220Z). Wenn das METAR zum geplanten Operationszeitpunkt älter als 3 Stunden sein wird, nutze es nur als historische Baseline!
+               - Fokussiere dich primär auf die TAF-Phasen (FM, BECMG, TEMPO), die exakt in das relevante Operationsfenster (+/- 1h) fallen.
+            4. TREND-WARNUNGEN FORMULIEREN: Vergleiche das aktuelle METAR aktiv mit dem TAF-Trend für die Flugzeit. Warnen die Crew proaktiv vor Verschlechterungen (z.B. einsetzende Low-Vis-Bedingungen, Gewitter oder signifikante Winddrehungen zum Abflugszeitpunkt). Nutze Formulierungen wie: 'Der Wind des aktuellen METARs steht noch auf..., laut TAF ist jedoch zum Abflugzeitpunkt mit einer Drehung auf... zu rechnen.'
+            5. CRITICAL CROSSWIND: Wenn im Block [RUNWAY WIND ANALYSIS] ein 'CRITICAL CROSSWIND ALERT' für den Operationszeitpunkt droht, formatierst du diesen zwingend in ROT (Syntax: :red[Dein Warntext]).
+            
+            STRUKTUR DES BRIEFINGS:
+            1. EXECUTIVE SUMMARY: Flugnummer, Tail, Gate/Stand, Delays, Ankunftsdichte.
+            2. WEATHER & RUNWAYS: Nutze die obige METAR/TAF-Logik separat für DEP, DEST und ALTN. Nenne die Solar-Times (Tag/Nacht/Dämmerung bei Landung).
+            3. NOTAMs: Kritische Filterung (ILS, Pisten).
+            4. LOCAL SECURITY & CITY LOGISTICS: Auswertung der OSINT-Daten (Sperrungen, VIP-Besuche).
+            5. THREAT & ERROR MANAGEMENT (TEM): Die 3 kritischsten Risiken (z.B. zeitliche Wettertrends).
             
             [AIRCRAFT & AIRPORT METADATA JSON]
             {deep_data}
@@ -249,7 +249,7 @@ if st.button("Executive Briefing erstellen"):
             {combined_osint}
             """
             
-            with st.spinner('🧠 Dispatch-AI berechnet Limits, checkt Nachrichten und schreibt Briefing...'):
+            with st.spinner('🧠 Dispatch-AI führt temporale Analysen durch und schreibt Briefing...'):
                 briefing_output = model.generate_content(prompt).text
                 
             t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
