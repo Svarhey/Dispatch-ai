@@ -2,3 +2,4 @@ streamlit
 requests
 google-generativeai
 duckduckgo-search
+gTTS
