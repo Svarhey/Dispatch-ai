@@ -158,7 +158,7 @@ if not gemini_key:
 # Das bewährte iPhone-Layout
 col_fn, col_date = st.columns(2)
 with col_fn:
-    flight_input = st.text_input("Flugnummer (z.B. LH94):", value="LH94").upper()
+    flight_input = st.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
 with col_date:
     flight_date = st.date_input("Flugdatum:", datetime.now().date())
 
