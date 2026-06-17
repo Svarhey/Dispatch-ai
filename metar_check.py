@@ -145,8 +145,8 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# Initialisierung des neuen Google GenAI Clients
-client = genai.Client(api_key=gemini_key, http_options={'api_version': 'v1alpha'})
+# Initialisierung des neuen Google GenAI Clients (Standard API)
+client = genai.Client(api_key=gemini_key)
 
 col_fn, col_date = st.columns(2)
 flight_input = col_fn.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
@@ -218,14 +218,14 @@ if st.button("Executive Briefing erstellen"):
             with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
                 # 1. Text Briefing generieren (mit dem neuen SDK Syntax)
                 response_text = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.5-flash',
                     contents=prompt_text
                 )
                 briefing_text = response_text.text
                 
                 # 2. Audio Skript schreiben
                 response_audio = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.5-flash',
                     contents=prompt_audio
                 )
                 audio_script = response_audio.text
@@ -234,7 +234,7 @@ if st.button("Executive Briefing erstellen"):
                 try:
                     # Wir übergeben den Text-Prompt direkt und fordern eine Audio-Antwort an
                     response_audio_tts = client.models.generate_content(
-                        model='gemini-2.0-flash-exp',
+                        model='gemini-3.5-flash',
                         contents=audio_script, # Den zuvor geschriebenen Text einsprechen lassen
                         config=types.GenerateContentConfig(
                             response_modalities=["AUDIO"],
