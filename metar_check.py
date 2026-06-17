@@ -6,6 +6,12 @@ import google.generativeai as genai
 from io import StringIO
 from datetime import datetime, timezone, timedelta
 
+# Sicheres Laden der Websuche
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
 def load_runway_database():
