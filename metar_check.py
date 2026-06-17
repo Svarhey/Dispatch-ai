@@ -219,22 +219,22 @@ if st.button("Executive Briefing erstellen"):
             with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
                 # 1. Text Briefing generieren
                 response_text = client.models.generate_content(
-                    model='gemini-2.0-flash',
+                    model='gemini-3.5-flash', # <--- KORRIGIERT
                     contents=prompt_text
                 )
                 briefing_text = response_text.text
                 
                 # 2. Audio Skript schreiben
                 response_audio = client.models.generate_content(
-                    model='gemini-2.0-flash',
+                    model='gemini-3.5-flash', # <--- KORRIGIERT
                     contents=prompt_audio
                 )
                 audio_script = response_audio.text
                 
-                # 3. Native Audio-Generierung (Vorteil Paid Tier: Ohne Stau direkt durchstarten)
+                # 3. Native Audio-Generierung
                 try:
                     response_audio_tts = client.models.generate_content(
-                        model='gemini-2.0-flash',
+                        model='gemini-3.5-flash', # <--- KORRIGIERT
                         contents=audio_script,
                         config=types.GenerateContentConfig(
                             response_modalities=["AUDIO"],
