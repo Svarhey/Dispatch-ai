@@ -1,3 +1,4 @@
+import time
 import requests
 import streamlit as st
 import math
@@ -216,48 +217,59 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
-            with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
+with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
                 # 1. Text Briefing generieren
                 response_text = client.models.generate_content(
-                    model='gemini-3.5-flash', # <--- KORRIGIERT
+                    model='gemini-3.5-flash',
                     contents=prompt_text
                 )
                 briefing_text = response_text.text
                 
                 # 2. Audio Skript schreiben
                 response_audio = client.models.generate_content(
-                    model='gemini-3.5-flash', # <--- KORRIGIERT
+                    model='gemini-3.5-flash',
                     contents=prompt_audio
                 )
                 audio_script = response_audio.text
                 
-                # 3. Native Audio-Generierung
-                try:
-                    response_audio_tts = client.models.generate_content(
-                        model='gemini-3.5-flash', # <--- KORRIGIERT
-                        contents=audio_script,
-                        config=types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=types.SpeechConfig(
-                                voice_config=types.VoiceConfig(
-                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                        voice_name="Aoede"
+                # 3. Native Audio-Generierung (Mit Retry-Holding-Pattern)
+                audio_bytes = None
+                max_retries = 3
+                
+                for attempt in range(max_retries):
+                    try:
+                        response_audio_tts = client.models.generate_content(
+                            model='gemini-3.5-flash',
+                            contents=audio_script,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=types.SpeechConfig(
+                                    voice_config=types.VoiceConfig(
+                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                            voice_name="Aoede"
+                                        )
                                     )
                                 )
                             )
                         )
-                    )
-                    
-                    audio_bytes = None
-                    if response_audio_tts.candidates:
-                        for part in response_audio_tts.candidates[0].content.parts:
-                            if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                audio_bytes = part.inline_data.data
-                                break
-
-                except Exception as e:
-                    audio_bytes = None
-                    st.error(f"Fehler bei der Audio-Generierung: {e}")
+                        
+                        if response_audio_tts.candidates:
+                            for part in response_audio_tts.candidates[0].content.parts:
+                                if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                    audio_bytes = part.inline_data.data
+                                    break
+                        break  # Erfolgreich generiert! Wir verlassen die Retry-Schleife.
+                        
+                    except Exception as e:
+                        if "503" in str(e) and attempt < max_retries - 1:
+                            wait_time = 2 ** (attempt + 1)  # Wartet 2, dann 4 Sekunden
+                            # Kurze Info an den Piloten, dass wir im Holding kreisen
+                            st.toast(f"⏳ Serverauslastung (503). Gehe ins Holding. Versuch {attempt + 2}/{max_retries} in {wait_time} Sekunden...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            st.error(f"Fehler bei der Audio-Generierung nach {attempt + 1} Versuchen: {e}")
+                            break
                 
             st.markdown("---")
             
