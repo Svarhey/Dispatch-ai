@@ -234,7 +234,7 @@ if st.button("Executive Briefing erstellen"):
                 try:
                     # Wir übergeben den Text-Prompt direkt und fordern eine Audio-Antwort an
                     response_audio_tts = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-2.0-flash-exp',
                         contents=audio_script, # Den zuvor geschriebenen Text einsprechen lassen
                         config=types.GenerateContentConfig(
                             response_modalities=["AUDIO"],
