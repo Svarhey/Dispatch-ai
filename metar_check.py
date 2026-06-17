@@ -1,3 +1,4 @@
+import time
 import requests
 import streamlit as st
 import math
@@ -230,45 +231,43 @@ if st.button("Executive Briefing erstellen"):
                 )
                 audio_script = response_audio.text
                 
-# 3. Native Audio Generierung mit Aoede (Sauberes SDK Format)
-                try:
-                    # Wir übergeben den Text-Prompt direkt und fordern eine Audio-Antwort an
-                    response_audio_tts = client.models.generate_content(
-                        model='gemini-3.5-flash',
-                        contents=audio_script, # Den zuvor geschriebenen Text einsprechen lassen
-                        config=types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=types.SpeechConfig(
-                                voice_config=types.VoiceConfig(
-                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                        voice_name="Aoede"
+# 3. Native Audio Generierung mit Aoede (Inklusive Holding-Pattern bei Server-Überlastung)
+                audio_bytes = None
+                max_retries = 3
+                
+                for attempt in range(max_retries):
+                    try:
+                        response_audio_tts = client.models.generate_content(
+                            model='gemini-3.5-flash',
+                            contents=audio_script,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=types.SpeechConfig(
+                                    voice_config=types.VoiceConfig(
+                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                            voice_name="Aoede"
+                                        )
                                     )
                                 )
                             )
                         )
-                    )
-                    
-                    audio_bytes = None
-                    # Das Audio-Ergebnis aus den Response-Teilen extrahieren
-                    if response_audio_tts.candidates:
-                        for part in response_audio_tts.candidates[0].content.parts:
-                            # Suchen nach dem Audio-Teil in der Antwort
-                            if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                audio_bytes = part.inline_data.data
-                                break
-
-                except Exception as e:
-                    audio_bytes = None
-                    st.error(f"Fehler bei der Audio-Generierung: {e}")
-            
-            # --- DER NATIVE AUDIO PLAYER ---
-            st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
-            if audio_bytes:
-                st.audio(audio_bytes, format="audio/wav")
-                with st.expander("Regie-Skript mitlesen (Denglish & SSML)"):
-                    st.write(audio_script)
-            else:
-                st.warning("Audiospur konnte nicht generiert werden.")
+                        
+                        if response_audio_tts.candidates:
+                            for part in response_audio_tts.candidates[0].content.parts:
+                                if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                    audio_bytes = part.inline_data.data
+                                    break
+                        break # Erfolgreich! Schleife verlassen.
+                        
+                    except Exception as e:
+                        if "503" in str(e) and attempt < max_retries - 1:
+                            # Server überlastet -> Wir gehen für 2, dann 4 Sekunden ins Holding
+                            wait_time = 2 ** (attempt + 1)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            st.error(f"Fehler bei der Audio-Generierung nach {attempt + 1} Versuchen: {e}")
+                            break
 
             # --- DIE BEKANNTEN REITER ---
             t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
