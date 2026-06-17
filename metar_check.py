@@ -146,7 +146,7 @@ if not gemini_key:
     st.stop()
 
 # Initialisierung des neuen Google GenAI Clients
-client = genai.Client(api_key=gemini_key)
+client = genai.Client(api_key=gemini_key, http_options={'api_version': 'v1alpha'})
 
 col_fn, col_date = st.columns(2)
 flight_input = col_fn.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
