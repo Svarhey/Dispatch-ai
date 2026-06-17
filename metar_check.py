@@ -9,10 +9,12 @@ from google.genai import types
 from datetime import datetime, timezone, timedelta
 from io import StringIO
 
+# --- SICHERER IMPORT DER WEBSUCHE ---
+DDGS = None
 try:
     from duckduckgo_search import DDGS
 except ImportError:
-    DDGS = None
+    pass
 
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
@@ -48,18 +50,24 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
     result = {"success": False, "error": "Fehler", "raw_flight": {}, "aircraft": {}, "solar": {}, "traffic_density": "No Data"}
     try:
         res = requests.get(f"https://aerodatabox.p.rapidapi.com/flights/number/{flight_clean}/{date_str}", headers=headers, timeout=10)
-        if res.status_code != 200 or len(res.json()) == 0: return {"success": False, "error": "Flug nicht gefunden."}
+        if res.status_code != 200 or len(res.json()) == 0: 
+            return {"success": False, "error": "Flug nicht gefunden."}
+        
         f_data = res.json()[0]
         result["raw_flight"] = f_data
         dep = f_data.get("departure", {}).get("airport", {}).get("icao")
         dest = f_data.get("arrival", {}).get("airport", {}).get("icao")
         reg = f_data.get("aircraft", {}).get("reg")
-        if not dep or not dest: return {"success": False, "error": "Keine Route."}
+        
+        if not dep or not dest: 
+            return {"success": False, "error": "Keine Route."}
+            
         result["success"] = True
         
         if reg:
             ac_res = requests.get(f"https://aerodatabox.p.rapidapi.com/aircrafts/reg/{reg}", headers=headers, timeout=5)
-            if ac_res.status_code == 200: result["aircraft"] = ac_res.json()
+            if ac_res.status_code == 200: 
+                result["aircraft"] = ac_res.json()
         
         arr_time_str = f_data.get("arrival", {}).get("scheduledTimeUtc")
         if arr_time_str:
@@ -67,24 +75,30 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
             from_t = (arr_dt - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M")
             to_t = (arr_dt + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M")
             traf_res = requests.get(f"https://aerodatabox.p.rapidapi.com/flights/airports/icao/{dest}/{from_t}/{to_t}", headers=headers, params={"withLeg": "false"}, timeout=5)
-            if traf_res.status_code == 200: result["traffic_density"] = f"{len(traf_res.json().get('arrivals', []))} Landungen im 30min Fenster."
+            if traf_res.status_code == 200: 
+                result["traffic_density"] = f"{len(traf_res.json().get('arrivals', []))} Landungen im 30min Fenster."
     except Exception as e:
         result["error"] = str(e)
     return result
 
 # --- LIVE WEBSEARCH AGENT (OSINT) ---
 def search_city_events(city_name, flight_date):
-    if not city_name or not DDGS: return "Keine Websuche möglich."
+    if not city_name or DDGS is None: 
+        return "Keine Websuche möglich."
+        
     date_str = flight_date.strftime("%Y-%m-%d")
     query = f"{city_name} events security marathon demonstration strikes political visit {date_str}"
+    
     try:
         with DDGS() as ddgs:
             search_results = list(ddgs.text(query, max_results=3))
             if search_results:
                 summary = f"--- OSINT für {city_name} ---\n"
-                for r in search_results: summary += f"- {r.get('title')}: {r.get('body')}\n"
+                for r in search_results: 
+                    summary += f"- {r.get('title')}: {r.get('body')}\n"
                 return summary
-    except: pass
+    except: 
+        pass
     return f"Keine lokalen Großereignisse für {city_name} detektiert."
 
 # --- METAR / TAF / NOTAM SAMMLER ---
@@ -101,13 +115,16 @@ def get_airport_raw_data(icao_code, label, all_runways):
             weather_info += f"METAR: {metar_raw}\n"
             wdir = metar_res[0].get("wdir")
             wspd = metar_res[0].get("wspd")
-        if taf_res: weather_info += f"TAF: {taf_res[0].get('rawTAF')}\n"
-    except: weather_info += "Wetter nicht verfügbar.\n"
+        if taf_res: 
+            weather_info += f"TAF: {taf_res[0].get('rawTAF')}\n"
+    except: 
+        weather_info += "Wetter nicht verfügbar.\n"
         
     if wdir and wspd and isinstance(wdir, (int, float)):
         weather_info += "\n[RUNWAY WIND ANALYSIS]\n"
         winter_ops = any(code in metar_raw for code in ["SN", "FZ", "PL", "GS", "GR"])
         airport_runways = [r for r in all_runways if r['airport_ident'].upper() == icao_code.upper()]
+        
         for rwy in airport_runways:
             ends = [(rwy.get('le_ident'), rwy.get('le_heading_degT')), (rwy.get('he_ident'), rwy.get('he_heading_degT'))]
             for rwy_id, rwy_hdg_str in ends:
@@ -116,12 +133,14 @@ def get_airport_raw_data(icao_code, label, all_runways):
                     angle = math.radians(wdir - rwy_hdg)
                     crosswind = abs(wspd * math.sin(angle))
                     cw_alert = ""
+                    
                     if winter_ops:
                         if crosswind >= 20.0: cw_alert = " 🔴 ⚠️ [CRITICAL CROSSWIND ALERT >= 20KT! (WINTER OPS)]"
                         elif crosswind >= 15.0: cw_alert = " ⚠️ [CROSSWIND ALERT >= 15KT! (WINTER OPS)]"
                     else:
                         if crosswind >= 30.0: cw_alert = " 🔴 ⚠️ [CRITICAL CROSSWIND ALERT >= 30KT!]"
                         elif crosswind >= 20.0: cw_alert = " ⚠️ [CROSSWIND ALERT >= 20KT!]"
+                        
                     weather_info += f"RWY {rwy_id} Crosswind: {crosswind:.1f} kt{cw_alert}\n"
 
     try:
@@ -130,8 +149,10 @@ def get_airport_raw_data(icao_code, label, all_runways):
         session.get("https://notams.aim.faa.gov/notamSearch/", timeout=5)
         n = session.post("https://notams.aim.faa.gov/notamSearch/search", data={"searchType": 0, "designatorsForLocation": icao_code.upper()}).json()
         if "notamList" in n:
-            for item in n["notamList"]: notam_info += f"- {item.get('icaoMessage', item.get('traditionalMessage', ''))}\n"
-    except: notam_info += "NOTAMs temporär nicht verfügbar.\n"
+            for item in n["notamList"]: 
+                notam_info += f"- {item.get('icaoMessage', item.get('traditionalMessage', ''))}\n"
+    except: 
+        notam_info += "NOTAMs temporär nicht verfügbar.\n"
         
     return weather_info, notam_info
 
@@ -147,7 +168,7 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# Sauberer, ungedrosselter Client für dein bezahltes Entwicklerkontingent
+# Sauberer Client für das Paid-Tier
 client = genai.Client(api_key=gemini_key)
 
 col_fn, col_date = st.columns(2)
@@ -156,4 +177,144 @@ flight_date = col_date.date_input("Flugdatum:", datetime.now().date())
 
 with st.expander("➕ Optionale Alternates hinzufügen"):
     a1, a2, a3, a4 = st.columns(4)
-    altns = [a1.text_input("ALTN 1", key="a1").upper(), a2.text_input("ALTN 2", key="a2").upper(), a3.text_input("ALTN
+    # SICHERER UMBRUCH: Diese Liste ist jetzt über mehrere Zeilen verteilt
+    altns = [
+        a1.text_input("ALTN 1", key="a1").upper(), 
+        a2.text_input("ALTN 2", key="a2").upper(), 
+        a3.text_input("ALTN 3", key="a3").upper(), 
+        a4.text_input("ALTN 4", key="a4").upper()
+    ]
+
+if st.button("Executive Briefing erstellen"):
+    if flight_input:
+        all_runways = load_runway_database()
+        deep_data = fetch_deep_flight_data(flight_input, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
+        
+        if deep_data["success"]:
+            f = deep_data["raw_flight"]
+            dep_icao = f.get("departure", {}).get("airport", {}).get("icao")
+            dest_icao = f.get("arrival", {}).get("airport", {}).get("icao")
+            current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            
+            st.success(f"✈️ Flugplan aktiv: {dep_icao} ➡️ {dest_icao} | Aircraft Tail: {f.get('aircraft', {}).get('reg')}")
+            
+            dep_city = get_airport_city(dep_icao)
+            dest_city = get_airport_city(dest_icao)
+            
+            dep_osint = search_city_events(dep_city, flight_date)
+            dest_osint = search_city_events(dest_city, flight_date)
+            combined_osint = f"{dep_osint}\n\n{dest_osint}"
+            
+            st.info("📡 Scanne weltweite Wetterdatenbänke und FAA NOTAM-Server...")
+            all_w = ""; all_n = ""
+            for code in [dep_icao, dest_icao] + [a for a in altns if a]:
+                label = "DEP" if code == dep_icao else ("DEST" if code == dest_icao else "ALTN")
+                w, n = get_airport_raw_data(code, label, all_runways)
+                all_w += w + "\n"; all_n += n + "\n"
+                
+            prompt_text = f"""
+            Du bist 'Dispatch-AI'. Aktuelle UTC-Zeit: {current_utc_time}.
+            Erstelle ein schriftliches Executive Pre-Flight Briefing auf Deutsch. Beachte zeitliche Limits (METAR vs TAF). Formatiere Critical Crosswind Alerts zwingend in ROT (:red[...]).
+            Nutze Aviation Denglish (z.B. Runway, Crosswind, Low Vis, Holdings).
+            
+            JSON: {deep_data}
+            WETTER: {all_w}
+            NOTAM: {all_n}
+            OSINT: {combined_osint}
+            """
+            
+            prompt_audio = f"""
+            Schreibe ein Radioskript für die KI-Stimme 'Aoede'. Du rufst die Crew als Dispatcher kurz an.
+            Tonfall: Kollegial, kompetent. 
+            
+            SPRACH-REGELN FÜR AOEDE:
+            1. Nutze natives Aviation Denglish.
+            2. PHONETIK-ZWANG: Schreibe alle luftfahrttechnischen Zahlen für Runways, Wind und Headings als ENGLISCHE WÖRTER aus! 
+            3. REGIEANWEISUNGEN (TAGS): Nutze emotionale Tags wie [serious], [sighs] oder [calm].
+            4. Kurz und knackig. Kein Markdown.
+            
+            JSON: {deep_data}
+            WETTER: {all_w}
+            NOTAM: {all_n}
+            OSINT: {combined_osint}
+            """
+            
+            with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
+                
+                # 1. Text Briefing
+                response_text = client.models.generate_content(
+                    model='gemini-3.5-flash',
+                    contents=prompt_text
+                )
+                briefing_text = response_text.text
+                
+                # 2. Audio Skript
+                response_audio = client.models.generate_content(
+                    model='gemini-3.5-flash',
+                    contents=prompt_audio
+                )
+                audio_script = response_audio.text
+                
+                # 3. Native Audio-Generierung (Mit Retry-Holding-Pattern)
+                audio_bytes = None
+                max_retries = 3
+                
+                for attempt in range(max_retries):
+                    try:
+                        response_audio_tts = client.models.generate_content(
+                            model='gemini-3.5-flash',
+                            contents=audio_script,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["AUDIO"],
+                                speech_config=types.SpeechConfig(
+                                    voice_config=types.VoiceConfig(
+                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                            voice_name="Aoede"
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                        
+                        if response_audio_tts.candidates:
+                            for part in response_audio_tts.candidates[0].content.parts:
+                                if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                    audio_bytes = part.inline_data.data
+                                    break
+                        break  
+                        
+                    except Exception as e:
+                        if "503" in str(e) and attempt < max_retries - 1:
+                            wait_time = 2 ** (attempt + 1)  
+                            st.toast(f"⏳ Serverauslastung (503). Gehe ins Holding. Versuch {attempt + 2}/{max_retries} in {wait_time} Sekunden...")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            st.error(f"Fehler bei der Audio-Generierung nach {attempt + 1} Versuchen: {e}")
+                            break
+            
+            st.markdown("---")
+            
+            # --- AUDIO PLAYER ---
+            st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/wav")
+                with st.expander("Regie-Skript mitlesen (Denglish & SSML)"):
+                    st.write(audio_script)
+            else:
+                st.warning("Audiospur konnte aufgrund einer Serverüberlastung nicht generiert werden.")
+
+            # --- TABS ---
+            t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
+            t1.markdown(briefing_text)
+            t2.code(all_w, language="text")
+            t3.code(all_n, language="text")
+            with t4:
+                st.markdown("### 🌐 Live OSINT City Security & Events")
+                st.code(combined_osint, language="text")
+                st.markdown("### ✈️ Telemetrie & API-JSON (AeroDataBox)")
+                st.json(deep_data)
+        else:
+            st.error(f"Fehler: {deep_data['error']}")
+    else:
+        st.warning("Bitte gib eine Flugnummer ein.")
