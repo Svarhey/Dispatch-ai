@@ -4,6 +4,7 @@ import math
 import csv
 import base64
 from google import genai
+from google.genai import types
 from datetime import datetime, timezone, timedelta
 
 try:
@@ -229,33 +230,36 @@ if st.button("Executive Briefing erstellen"):
                 )
                 audio_script = response_audio.text
                 
-                # 3. Native Audio Generierung mit Aoede über die Interactions API
+# 3. Native Audio Generierung mit Aoede (Sauberes SDK Format)
                 try:
-                    interaction = client.interactions.create(
-                        model="gemini-3.1-flash-tts-preview",
-                        input=audio_script,
-                        response_modalities=["audio"],
-                        generation_config={
-                            "speech_config": {"voice": "Aoede"}
-                        }
+                    # Wir übergeben den Text-Prompt direkt und fordern eine Audio-Antwort an
+                    response_audio_tts = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=audio_script, # Den zuvor geschriebenen Text einsprechen lassen
+                        config=types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=types.SpeechConfig(
+                                voice_config=types.VoiceConfig(
+                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                        voice_name="Aoede"
+                                    )
+                                )
+                            )
+                        )
                     )
                     
                     audio_bytes = None
-                    # Das Audio-Ergebnis aus der Response extrahieren
-                    for output in interaction.outputs:
-                        if output.type == "audio":
-                            audio_bytes = base64.b64decode(output.data)
-                            break
-                            
-                    # Fallback Struktur, falls die API die Daten direkt unter output_audio.data liefert
-                    if not audio_bytes and hasattr(interaction, 'output_audio') and interaction.output_audio:
-                        audio_bytes = base64.b64decode(interaction.output_audio.data)
+                    # Das Audio-Ergebnis aus den Response-Teilen extrahieren
+                    if response_audio_tts.candidates:
+                        for part in response_audio_tts.candidates[0].content.parts:
+                            # Suchen nach dem Audio-Teil in der Antwort
+                            if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                audio_bytes = part.inline_data.data
+                                break
 
                 except Exception as e:
                     audio_bytes = None
                     st.error(f"Fehler bei der Audio-Generierung: {e}")
-                
-            st.markdown("---")
             
             # --- DER NATIVE AUDIO PLAYER ---
             st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
