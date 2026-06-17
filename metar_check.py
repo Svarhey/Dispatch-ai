@@ -2,19 +2,14 @@ import requests
 import streamlit as st
 import math
 import csv
-import google.generativeai as genai
-from io import BytesIO
+import base64
+from google import genai
 from datetime import datetime, timezone, timedelta
 
 try:
     from duckduckgo_search import DDGS
 except ImportError:
     DDGS = None
-
-try:
-    from gtts import gTTS
-except ImportError:
-    gTTS = None
 
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
@@ -23,7 +18,7 @@ def load_runway_database():
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        reader = csv.DictReader(StringIO(response.text))
+        reader = csv.DictReader(response.text.splitlines())
         return [row for row in reader if row['closed'] == '0']
     except:
         return []
@@ -33,7 +28,7 @@ def get_airport_city(icao_code):
     url = f"https://davidmegginson.github.io/ourairports-data/airports.csv"
     try:
         res = requests.get(url, timeout=10)
-        reader = csv.DictReader(StringIO(res.text))
+        reader = csv.DictReader(res.text.splitlines())
         for row in reader:
             if row['ident'].upper() == icao_code.upper():
                 return row.get('municipality', '')
@@ -149,6 +144,9 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
+# Initialisierung des neuen Google GenAI Clients
+client = genai.Client(api_key=gemini_key)
+
 col_fn, col_date = st.columns(2)
 flight_input = col_fn.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
 flight_date = col_date.date_input("Flugdatum:", datetime.now().date())
@@ -184,9 +182,6 @@ if st.button("Executive Briefing erstellen"):
                 w, n = get_airport_raw_data(code, label, all_runways)
                 all_w += w + "\n"; all_n += n + "\n"
                 
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            
             # --- GEHIRN 1: DAS TEXT BRIEFING ---
             prompt_text = f"""
             Du bist 'Dispatch-AI'. Aktuelle UTC-Zeit: {current_utc_time}.
@@ -199,20 +194,19 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
-            # --- GEHIRN 2: DAS AUDIO SKRIPT FÜR DEN DISPATCHER ANRUF ---
+            # --- GEHIRN 2: DAS AUDIO SKRIPT FÜR AOEDE ---
             prompt_audio = f"""
-            Schreibe ein Radioskript, das von einer TTS-Stimme vorgelesen wird. 
-            Szenario: Du bist ein Kollege vom Lufthansa Dispatch und rufst die Crew kurz an.
-            Tonfall: Entspannt, kollegial, direkt. ("Hallo Crew, hier ist euer Dispatcher für die LH94...")
+            Schreibe ein Radioskript für die KI-Stimme 'Aoede'. Du rufst die Crew als Dispatcher kurz an.
+            Tonfall: Kollegial, kompetent. 
             
-            SPRACH-REGELN (EXTREM WICHTIG):
-            - Nutze durchgehend Aviation Denglish! (Takeoff, Approach, Gear, RVR, Low Vis, Gusts, Crosswind).
-            - ACHTUNG PHONETIK: Damit die deutsche Stimme Zahlen richtig ausspricht, musst du Zahlen als ENGLISCHE WÖRTER ausschreiben!
-              Beispiel FALSCH: "Wind aus 250 mit 15."
-              Beispiel RICHTIG: "Der Wind am Dest kommt aus two five zero at one five knots, gusting two five."
-              Beispiel RICHTIG: "Runway two five right."
-            - Mache kurze, klare Sätze. Lass rohe NOTAM-Codes und unwichtige Details weg. Fokussiere dich auf TEM (Threats).
-            - Keine Sternchen (*), keine Markdown-Formatierung.
+            SPRACH-REGELN FÜR AOEDE:
+            1. Nutze natives Aviation Denglish. (Takeoff, Approach, Gear, RVR, Low Vis, Crosswind).
+            2. PHONETIK-ZWANG: Schreibe alle luftfahrttechnischen Zahlen für Runways, Wind und Headings als ENGLISCHE WÖRTER aus! (Beispiel: "Runway two five right", "Wind aus two five zero at one five knots").
+            3. REGIEANWEISUNGEN (TAGS): Nutze emotionale Tags im Text, um Aoede zu lenken! 
+               - Nutze [serious] vor kritischen Warnungen (Crosswind, Gewitter, OSINT-Sperrungen).
+               - Nutze [sighs] oder [tired], wenn extrem viele mühsame NOTAMs aktiv sind.
+               - Nutze [calm] für normale Wetterdaten.
+            4. Kurz und knackig. Kein Markdown.
             
             JSON: {deep_data}
             WETTER: {all_w}
@@ -220,26 +214,57 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
-            with st.spinner('🧠 Generiere Text- und Audio-Briefings...'):
-                briefing_text = model.generate_content(prompt_text).text
-                audio_script = model.generate_content(prompt_audio).text
+            with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
+                # 1. Text Briefing generieren (mit dem neuen SDK Syntax)
+                response_text = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt_text
+                )
+                briefing_text = response_text.text
                 
-                # Audio Datei via gTTS generieren
-                audio_bytes = BytesIO()
-                if gTTS:
-                    tts = gTTS(text=audio_script, lang='de', slow=False)
-                    tts.write_to_fp(audio_bytes)
+                # 2. Audio Skript schreiben
+                response_audio = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt_audio
+                )
+                audio_script = response_audio.text
+                
+                # 3. Native Audio Generierung mit Aoede über die Interactions API
+                try:
+                    interaction = client.interactions.create(
+                        model="gemini-3.1-flash-tts-preview",
+                        input=audio_script,
+                        response_modalities=["audio"],
+                        generation_config={
+                            "speech_config": {"voice": "Aoede"}
+                        }
+                    )
+                    
+                    audio_bytes = None
+                    # Das Audio-Ergebnis aus der Response extrahieren
+                    for output in interaction.outputs:
+                        if output.type == "audio":
+                            audio_bytes = base64.b64decode(output.data)
+                            break
+                            
+                    # Fallback Struktur, falls die API die Daten direkt unter output_audio.data liefert
+                    if not audio_bytes and hasattr(interaction, 'output_audio') and interaction.output_audio:
+                        audio_bytes = base64.b64decode(interaction.output_audio.data)
+
+                except Exception as e:
+                    audio_bytes = None
+                    st.error(f"Fehler bei der Audio-Generierung: {e}")
                 
             st.markdown("---")
             
-            # --- DER AUDIO PLAYER ---
-            st.markdown("### 🎧 Audio Dispatch Briefing")
-            if gTTS:
-                st.audio(audio_bytes, format="audio/mp3")
-                with st.expander("Skript mitlesen (Denglish Phonetisch)"):
+            # --- DER NATIVE AUDIO PLAYER ---
+            st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/wav")
+                with st.expander("Regie-Skript mitlesen (Denglish & SSML)"):
                     st.write(audio_script)
             else:
-                st.error("Bitte 'gTTS' in die requirements.txt eintragen!")
+                st.warning("Audiospur konnte nicht generiert werden.")
 
             # --- DIE BEKANNTEN REITER ---
             t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
