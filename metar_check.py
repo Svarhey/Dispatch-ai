@@ -1,4 +1,3 @@
-import time
 import requests
 import streamlit as st
 import math
@@ -7,6 +6,7 @@ import base64
 from google import genai
 from google.genai import types
 from datetime import datetime, timezone, timedelta
+from io import StringIO
 
 try:
     from duckduckgo_search import DDGS
@@ -38,7 +38,7 @@ def get_airport_city(icao_code):
         pass
     return ""
 
-# --- TRACKING & DEEP DATA API ---
+# --- TRACKING & DEEP DATA API (5 MINUTEN CACHE) ---
 @st.cache_data(ttl=300)
 def fetch_deep_flight_data(flight_number, flight_date, api_key):
     flight_clean = flight_number.replace(" ", "").upper()
@@ -146,7 +146,7 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# Initialisierung des neuen Google GenAI Clients (Standard API)
+# Sauberer, ungedrosselter Client für dein bezahltes Entwicklerkontingent
 client = genai.Client(api_key=gemini_key)
 
 col_fn, col_date = st.columns(2)
@@ -217,59 +217,60 @@ if st.button("Executive Briefing erstellen"):
             """
             
             with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
-                # 1. Text Briefing generieren (mit dem neuen SDK Syntax)
+                # 1. Text Briefing generieren
                 response_text = client.models.generate_content(
-                    model='gemini-3.5-flash',
+                    model='gemini-2.0-flash',
                     contents=prompt_text
                 )
                 briefing_text = response_text.text
                 
                 # 2. Audio Skript schreiben
                 response_audio = client.models.generate_content(
-                    model='gemini-3.5-flash',
+                    model='gemini-2.0-flash',
                     contents=prompt_audio
                 )
                 audio_script = response_audio.text
                 
-# 3. Native Audio Generierung mit Aoede (Inklusive Holding-Pattern bei Server-Überlastung)
-                audio_bytes = None
-                max_retries = 3
-                
-                for attempt in range(max_retries):
-                    try:
-                        response_audio_tts = client.models.generate_content(
-                            model='gemini-3.5-flash',
-                            contents=audio_script,
-                            config=types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=types.SpeechConfig(
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name="Aoede"
-                                        )
+                # 3. Native Audio-Generierung (Vorteil Paid Tier: Ohne Stau direkt durchstarten)
+                try:
+                    response_audio_tts = client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=audio_script,
+                        config=types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=types.SpeechConfig(
+                                voice_config=types.VoiceConfig(
+                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                        voice_name="Aoede"
                                     )
                                 )
                             )
                         )
-                        
-                        if response_audio_tts.candidates:
-                            for part in response_audio_tts.candidates[0].content.parts:
-                                if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                    audio_bytes = part.inline_data.data
-                                    break
-                        break # Erfolgreich! Schleife verlassen.
-                        
-                    except Exception as e:
-                        if "503" in str(e) and attempt < max_retries - 1:
-                            # Server überlastet -> Wir gehen für 2, dann 4 Sekunden ins Holding
-                            wait_time = 2 ** (attempt + 1)
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            st.error(f"Fehler bei der Audio-Generierung nach {attempt + 1} Versuchen: {e}")
-                            break
+                    )
+                    
+                    audio_bytes = None
+                    if response_audio_tts.candidates:
+                        for part in response_audio_tts.candidates[0].content.parts:
+                            if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                audio_bytes = part.inline_data.data
+                                break
 
-            # --- DIE BEKANNTEN REITER ---
+                except Exception as e:
+                    audio_bytes = None
+                    st.error(f"Fehler bei der Audio-Generierung: {e}")
+                
+            st.markdown("---")
+            
+            # --- DER NATIVE AUDIO PLAYER ---
+            st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/wav")
+                with st.expander("Regie-Skript mitlesen (Denglish & SSML)"):
+                    st.write(audio_script)
+            else:
+                st.warning("Audiospur konnte aufgrund einer Serverüberlastung nicht generiert werden.")
+
+            # --- DIE REITER ---
             t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
             t1.markdown(briefing_text)
             t2.code(all_w, language="text")
