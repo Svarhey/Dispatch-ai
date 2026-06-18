@@ -5,21 +5,13 @@ import math
 import csv
 import base64
 from google import genai
-from google.genai import types
 from datetime import datetime, timezone, timedelta
-from io import StringIO, BytesIO
 
 # --- SICHERER IMPORT DER WEBSUCHE ---
 try:
     from duckduckgo_search import DDGS
 except ImportError:
     DDGS = None
-
-# --- SICHERER IMPORT DES BACKUP-AUDIO-SYSTEMS ---
-try:
-    from gtts import gTTS
-except ImportError:
-    gTTS = None
 
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
@@ -241,19 +233,17 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
-            # --- GEHIRN 2: STRENG ZENSUR-OPTIMIERTES AUDIO BRIEFING PROMPT ---
+            # Neues Prompt für die Cloud TTS Stimme
             prompt_audio = f"""
-            Schreibe ein ultrakurzes Radioskript für die KI-Stimme 'Aoede'. Du rufst die Crew als Dispatcher kurz an.
-            Tonfall: Kollegial, kompetent. Keine Einleitung, starte direkt mit dem Flug. Keine Formatierung, kein Markdown.
+            Schreibe ein kurzes Radioskript für eine professionelle TTS-Stimme. Du rufst die Crew als Dispatcher kurz an.
+            Tonfall: Kollegial, kompetent. Keine Einleitung, starte direkt mit dem Flug. Keine Formatierung, kein Markdown. Keine Regie-Tags (wie [calm] oder [serious]), nur reiner Text!
             Zahlen zwingend als englische Wörter ausschreiben (two five zero, etc.).
 
             STRENGE FILTERREGELN FÜR GEZIELTES WEGLASSEN (NORMAL OPS OMISSION):
-            1. WEATHER: Wenn für das Zeitfenster (+/-1h) der Wind 10 Knoten oder schwächer ist, die Sichtweite 5000 Meter oder mehr beträgt UND keine Phänomene (wie Showers, Snow, Fog, MIST oder CB-Aktivität) gemeldet sind, sage NUR: "Wetter ist unauffällig." Analysiere Details nur bei Abweichungen!
-            2. NOTAMs: Erwähne NUR signifikante operative Einschränkungen: Runway oder Taxiway closures, sowie suspended oder downgraded approach procedures. Jedes andere NOTAM (VASI u/s, Obstacles, etc.) wird strikt verschwiegen! Wenn nichts davon vorliegt, verliere kein Wort über NOTAMs.
-            3. LOGISTICS / EVENTS: Wenn die OSINT-Suche keine Events ausgibt, die den Crewbus-Transfer oder den Hotelaufenthalt blockieren, schweige das Thema komplett tot.
-            4. DELAYS / TRAFFIC: Wenn keine Slots, Holdings oder Traffic Peaks im JSON erkennbar sind, erwähne dieses Thema überhaupt nicht.
-
-            Das Ziel ist radikale Kürze. Jedes verschwiegene Thema spart Rechenzeit und verhindert API-Fehler!
+            1. WEATHER: Wenn für das Zeitfenster (+/-1h) der Wind 10 Knoten oder schwächer ist, die Sichtweite 5000 Meter oder mehr beträgt UND keine Phänomene gemeldet sind, sage NUR: "Wetter ist unauffällig."
+            2. NOTAMs: Erwähne NUR signifikante operative Einschränkungen: Runway oder Taxiway closures, sowie suspended oder downgraded approach procedures.
+            3. LOGISTICS / EVENTS: Wenn keine signifikanten Events anstehen, schweige das Thema komplett tot.
+            4. DELAYS / TRAFFIC: Ohne konkrete Slots oder Holdings, erwähne dieses Thema nicht.
             
             JSON: {deep_data}
             WETTER: {all_w}
@@ -261,7 +251,7 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
-            with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
+            with st.spinner('🧠 Generiere Text-Briefing und Cloud Audio...'):
                 # 1. Text Briefing generieren
                 response_text = client.models.generate_content(
                     model='gemini-3.5-flash', contents=prompt_text
@@ -274,106 +264,37 @@ if st.button("Executive Briefing erstellen"):
                 )
                 audio_script = response_audio.text
                 
-                # 3. Native Audio-Generierung (Mit intelligentem Multi-Level Fallback)
+                # 3. Cloud TTS Audio Generierung (Stabilste Enterprise API)
                 audio_bytes = None
-                audio_format = "audio/wav"
-                fallback_level = "primary"
-                
-                # LEVEL 1: Normaler Versuch (Bereits stark komprimiertes Skript)
                 try:
-                    response_audio_tts = client.models.generate_content(
-                        model='gemini-3.5-flash',
-                        contents=audio_script,
-                        config=types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=types.SpeechConfig(
-                                voice_config=types.VoiceConfig(
-                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                        voice_name="Aoede"
-                                    )
-                                )
-                            )
-                        )
-                    )
-                    if response_audio_tts.candidates:
-                        for part in response_audio_tts.candidates[0].content.parts:
-                            if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                audio_bytes = part.inline_data.data
-                                break
-                except Exception as e_primary:
-                    # Umschalten auf Stufe 2 (Ultra Short Warning)
-                    fallback_level = "ultra_short"
-                
-                # LEVEL 2 (Intermediate Fallback): Wenn Stufe 1 abstürzt, erzwingen wir eine Notfall-Kürzung
-                if fallback_level == "ultra_short":
-                    try:
-                        st.toast("⏳ Audio-Generierung ausgelastet oder zu komplex. Generiere Ultra-Short Fallback...")
-                        prompt_ultra = f"""
-                        Du bist 'Dispatch-AI'. Das ausführliche Audio-Briefing ist serverseitig fehlgeschlagen.
-                        Schreibe ein Notfall-Radioskript für 'Aoede' (Maximal 2 Sätze!).
-                        Inhalt: Sage der Crew klipp und klar, dass das Audio aufgrund zu hoher Dichte an kritischen Informationen abgebrochen wurde. Nenne NUR die 2 absoluten Main Threats aus dem Skript und weise sie ausdrücklich an, das schriftliche Briefing für Wetter und NOTAMs intensiv selbst im Cockpit zu prüfen.
-                        Zahlen als englische Wörter ausschreiben. Keine Formatierung.
-                        BASIS-SKRIPT: {audio_script}
-                        """
-                        response_ultra = client.models.generate_content(
-                            model='gemini-3.5-flash', contents=prompt_ultra
-                        )
-                        ultra_script = response_ultra.text
-                        
-                        response_audio_tts = client.models.generate_content(
-                            model='gemini-3.5-flash',
-                            contents=ultra_script,
-                            config=types.GenerateContentConfig(
-                                response_modalities=["AUDIO"],
-                                speech_config=types.SpeechConfig(
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name="Aoede"
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                        if response_audio_tts.candidates:
-                            for part in response_audio_tts.candidates[0].content.parts:
-                                if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                                    audio_bytes = part.inline_data.data
-                                    audio_script = ultra_script # Textbox updaten
-                                    fallback_level = "ultra_short_success"
-                                    break
-                    except Exception as e_ultra:
-                        fallback_level = "gtts"
-                
-                # LEVEL 3 (Ultimate Fallback): Letzte Instanz via gTTS (Roboterstimme)
-                if fallback_level == "gtts" or (fallback_level == "ultra_short" and audio_bytes is None):
-                    if gTTS:
-                        st.toast("⚠️ Premium-Stimme blockiert komplett. Wechsle auf Backup-Audiosystem...")
-                        try:
-                            clean_script = audio_script.replace("[serious]", "").replace("[calm]", "").replace("[sighs]", "")
-                            tts = gTTS(text=clean_script, lang='de', slow=False)
-                            fp = BytesIO()
-                            tts.write_to_fp(fp)
-                            audio_bytes = fp.getvalue()
-                            audio_format = "audio/mp3"
-                        except Exception as fallback_error:
-                            st.error(f"Komplettausfall des Audiosystems: {fallback_error}")
+                    tts_url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={gemini_key}"
+                    tts_payload = {
+                        "input": {"text": audio_script},
+                        "voice": {"languageCode": "de-DE", "name": "de-DE-Neural2-F"},
+                        "audioConfig": {"audioEncoding": "MP3"}
+                    }
+                    tts_res = requests.post(tts_url, json=tts_payload)
+                    
+                    if tts_res.status_code == 200:
+                        audio_content = tts_res.json().get("audioContent")
+                        if audio_content:
+                            audio_bytes = base64.b64decode(audio_content)
+                    else:
+                        st.error(f"Google Cloud TTS Fehler: {tts_res.status_code} - {tts_res.text}")
+                except Exception as e:
+                    st.error(f"Fehler bei der Verbindung zu Google Cloud TTS: {e}")
             
             st.markdown("---")
             
-            # --- AUDIO PLAYER HEADLINE ANPASSUNG ---
-            if audio_format == "audio/mp3":
-                st.markdown("### 🎧 Dispatch Audio (Backup-Roboterstimme aktiv)")
-            elif fallback_level == "ultra_short_success":
-                st.markdown("### 🎧 Dispatch Audio (⚠️ Krise: Ultra-Short Warning aktiv)")
-            else:
-                st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
+            # --- AUDIO PLAYER ---
+            st.markdown("### 🎧 Native Dispatch Audio (Google Cloud Neural2)")
                 
             if audio_bytes:
-                st.audio(audio_bytes, format=audio_format)
-                with st.expander("Regie-Skript mitlesen (Denglish & SSML)"):
+                st.audio(audio_bytes, format="audio/mp3")
+                with st.expander("Skript mitlesen (Denglish Phonetisch)"):
                     st.write(audio_script)
             else:
-                st.warning("Audiospur konnte im Moment nicht generiert werden.")
+                st.warning("Audiospur konnte nicht generiert werden. Bitte API-Status prüfen.")
 
             # --- TABS ---
             t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
