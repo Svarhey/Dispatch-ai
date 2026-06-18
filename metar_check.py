@@ -7,14 +7,19 @@ import base64
 from google import genai
 from google.genai import types
 from datetime import datetime, timezone, timedelta
-from io import StringIO
+from io import StringIO, BytesIO
 
 # --- SICHERER IMPORT DER WEBSUCHE ---
-DDGS = None
 try:
     from duckduckgo_search import DDGS
 except ImportError:
-    pass
+    DDGS = None
+
+# --- SICHERER IMPORT DES BACKUP-AUDIO-SYSTEMS ---
+try:
+    from gtts import gTTS
+except ImportError:
+    gTTS = None
 
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
@@ -46,10 +51,19 @@ def get_airport_city(icao_code):
 def fetch_deep_flight_data(flight_number, flight_date, api_key):
     flight_clean = flight_number.replace(" ", "").upper()
     date_str = flight_date.strftime("%Y-%m-%d")
-    headers = {"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com"}
-    result = {"success": False, "error": "Fehler", "raw_flight": {}, "aircraft": {}, "solar": {}, "traffic_density": "No Data"}
+    headers = {
+        "X-RapidAPI-Key": api_key, 
+        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com"
+    }
+    result = {
+        "success": False, "error": "Fehler", "raw_flight": {}, 
+        "aircraft": {}, "solar": {}, "traffic_density": "No Data"
+    }
     try:
-        res = requests.get(f"https://aerodatabox.p.rapidapi.com/flights/number/{flight_clean}/{date_str}", headers=headers, timeout=10)
+        res = requests.get(
+            f"https://aerodatabox.p.rapidapi.com/flights/number/{flight_clean}/{date_str}", 
+            headers=headers, timeout=10
+        )
         if res.status_code != 200 or len(res.json()) == 0: 
             return {"success": False, "error": "Flug nicht gefunden."}
         
@@ -65,7 +79,10 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
         result["success"] = True
         
         if reg:
-            ac_res = requests.get(f"https://aerodatabox.p.rapidapi.com/aircrafts/reg/{reg}", headers=headers, timeout=5)
+            ac_res = requests.get(
+                f"https://aerodatabox.p.rapidapi.com/aircrafts/reg/{reg}", 
+                headers=headers, timeout=5
+            )
             if ac_res.status_code == 200: 
                 result["aircraft"] = ac_res.json()
         
@@ -74,7 +91,10 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
             arr_dt = datetime.fromisoformat(arr_time_str.replace("Z", "+00:00"))
             from_t = (arr_dt - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M")
             to_t = (arr_dt + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M")
-            traf_res = requests.get(f"https://aerodatabox.p.rapidapi.com/flights/airports/icao/{dest}/{from_t}/{to_t}", headers=headers, params={"withLeg": "false"}, timeout=5)
+            traf_res = requests.get(
+                f"https://aerodatabox.p.rapidapi.com/flights/airports/icao/{dest}/{from_t}/{to_t}", 
+                headers=headers, params={"withLeg": "false"}, timeout=5
+            )
             if traf_res.status_code == 200: 
                 result["traffic_density"] = f"{len(traf_res.json().get('arrivals', []))} Landungen im 30min Fenster."
     except Exception as e:
@@ -168,7 +188,6 @@ if not gemini_key:
     st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# Sauberer Client für das Paid-Tier
 client = genai.Client(api_key=gemini_key)
 
 col_fn, col_date = st.columns(2)
@@ -177,7 +196,6 @@ flight_date = col_date.date_input("Flugdatum:", datetime.now().date())
 
 with st.expander("➕ Optionale Alternates hinzufügen"):
     a1, a2, a3, a4 = st.columns(4)
-    # SICHERER UMBRUCH: Diese Liste ist jetzt über mehrere Zeilen verteilt
     altns = [
         a1.text_input("ALTN 1", key="a1").upper(), 
         a2.text_input("ALTN 2", key="a2").upper(), 
@@ -223,15 +241,19 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
+            # --- GEHIRN 2: STRENG ZENSUR-OPTIMIERTES AUDIO BRIEFING PROMPT ---
             prompt_audio = f"""
-            Schreibe ein Radioskript für die KI-Stimme 'Aoede'. Du rufst die Crew als Dispatcher kurz an.
-            Tonfall: Kollegial, kompetent. 
-            
-            SPRACH-REGELN FÜR AOEDE:
-            1. Nutze natives Aviation Denglish.
-            2. PHONETIK-ZWANG: Schreibe alle luftfahrttechnischen Zahlen für Runways, Wind und Headings als ENGLISCHE WÖRTER aus! 
-            3. REGIEANWEISUNGEN (TAGS): Nutze emotionale Tags wie [serious], [sighs] oder [calm].
-            4. Kurz und knackig. Kein Markdown.
+            Schreibe ein ultrakurzes Radioskript für die KI-Stimme 'Aoede'. Du rufst die Crew als Dispatcher kurz an.
+            Tonfall: Kollegial, kompetent. Keine Einleitung, starte direkt mit dem Flug. Keine Formatierung, kein Markdown.
+            Zahlen zwingend als englische Wörter ausschreiben (two five zero, etc.).
+
+            STRENGE FILTERREGELN FÜR GEZIELTES WEGLASSEN (NORMAL OPS OMISSION):
+            1. WEATHER: Wenn für das Zeitfenster (+/-1h) der Wind 10 Knoten oder schwächer ist, die Sichtweite 5000 Meter oder mehr beträgt UND keine Phänomene (wie Showers, Snow, Fog, MIST oder CB-Aktivität) gemeldet sind, sage NUR: "Wetter ist unauffällig." Analysiere Details nur bei Abweichungen!
+            2. NOTAMs: Erwähne NUR signifikante operative Einschränkungen: Runway oder Taxiway closures, sowie suspended oder downgraded approach procedures. Jedes andere NOTAM (VASI u/s, Obstacles, etc.) wird strikt verschwiegen! Wenn nichts davon vorliegt, verliere kein Wort über NOTAMs.
+            3. LOGISTICS / EVENTS: Wenn die OSINT-Suche keine Events ausgibt, die den Crewbus-Transfer oder den Hotelaufenthalt blockieren, schweige das Thema komplett tot.
+            4. DELAYS / TRAFFIC: Wenn keine Slots, Holdings oder Traffic Peaks im JSON erkennbar sind, erwähne dieses Thema überhaupt nicht.
+
+            Das Ziel ist radikale Kürze. Jedes verschwiegene Thema spart Rechenzeit und verhindert API-Fehler!
             
             JSON: {deep_data}
             WETTER: {all_w}
@@ -240,30 +262,67 @@ if st.button("Executive Briefing erstellen"):
             """
             
             with st.spinner('🧠 Generiere Text-Briefing und hochauflösendes Gemini Audio (Aoede)...'):
-                
-                # 1. Text Briefing
+                # 1. Text Briefing generieren
                 response_text = client.models.generate_content(
-                    model='gemini-3.5-flash',
-                    contents=prompt_text
+                    model='gemini-3.5-flash', contents=prompt_text
                 )
                 briefing_text = response_text.text
                 
-                # 2. Audio Skript
+                # 2. Audio Skript schreiben
                 response_audio = client.models.generate_content(
-                    model='gemini-3.5-flash',
-                    contents=prompt_audio
+                    model='gemini-3.5-flash', contents=prompt_audio
                 )
                 audio_script = response_audio.text
                 
-                # 3. Native Audio-Generierung (Mit Retry-Holding-Pattern)
+                # 3. Native Audio-Generierung (Mit intelligentem Multi-Level Fallback)
                 audio_bytes = None
-                max_retries = 3
+                audio_format = "audio/wav"
+                fallback_level = "primary"
                 
-                for attempt in range(max_retries):
+                # LEVEL 1: Normaler Versuch (Bereits stark komprimiertes Skript)
+                try:
+                    response_audio_tts = client.models.generate_content(
+                        model='gemini-3.5-flash',
+                        contents=audio_script,
+                        config=types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=types.SpeechConfig(
+                                voice_config=types.VoiceConfig(
+                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                        voice_name="Aoede"
+                                    )
+                                )
+                            )
+                        )
+                    )
+                    if response_audio_tts.candidates:
+                        for part in response_audio_tts.candidates[0].content.parts:
+                            if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
+                                audio_bytes = part.inline_data.data
+                                break
+                except Exception as e_primary:
+                    # Umschalten auf Stufe 2 (Ultra Short Warning)
+                    fallback_level = "ultra_short"
+                
+                # LEVEL 2 (Intermediate Fallback): Wenn Stufe 1 abstürzt, erzwingen wir eine Notfall-Kürzung
+                if fallback_level == "ultra_short":
                     try:
+                        st.toast("⏳ Audio-Generierung ausgelastet oder zu komplex. Generiere Ultra-Short Fallback...")
+                        prompt_ultra = f"""
+                        Du bist 'Dispatch-AI'. Das ausführliche Audio-Briefing ist serverseitig fehlgeschlagen.
+                        Schreibe ein Notfall-Radioskript für 'Aoede' (Maximal 2 Sätze!).
+                        Inhalt: Sage der Crew klipp und klar, dass das Audio aufgrund zu hoher Dichte an kritischen Informationen abgebrochen wurde. Nenne NUR die 2 absoluten Main Threats aus dem Skript und weise sie ausdrücklich an, das schriftliche Briefing für Wetter und NOTAMs intensiv selbst im Cockpit zu prüfen.
+                        Zahlen als englische Wörter ausschreiben. Keine Formatierung.
+                        BASIS-SKRIPT: {audio_script}
+                        """
+                        response_ultra = client.models.generate_content(
+                            model='gemini-3.5-flash', contents=prompt_ultra
+                        )
+                        ultra_script = response_ultra.text
+                        
                         response_audio_tts = client.models.generate_content(
                             model='gemini-3.5-flash',
-                            contents=audio_script,
+                            contents=ultra_script,
                             config=types.GenerateContentConfig(
                                 response_modalities=["AUDIO"],
                                 speech_config=types.SpeechConfig(
@@ -275,34 +334,46 @@ if st.button("Executive Briefing erstellen"):
                                 )
                             )
                         )
-                        
                         if response_audio_tts.candidates:
                             for part in response_audio_tts.candidates[0].content.parts:
                                 if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
                                     audio_bytes = part.inline_data.data
+                                    audio_script = ultra_script # Textbox updaten
+                                    fallback_level = "ultra_short_success"
                                     break
-                        break  
-                        
-                    except Exception as e:
-                        if "503" in str(e) and attempt < max_retries - 1:
-                            wait_time = 2 ** (attempt + 1)  
-                            st.toast(f"⏳ Serverauslastung (503). Gehe ins Holding. Versuch {attempt + 2}/{max_retries} in {wait_time} Sekunden...")
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            st.error(f"Fehler bei der Audio-Generierung nach {attempt + 1} Versuchen: {e}")
-                            break
+                    except Exception as e_ultra:
+                        fallback_level = "gtts"
+                
+                # LEVEL 3 (Ultimate Fallback): Letzte Instanz via gTTS (Roboterstimme)
+                if fallback_level == "gtts" or (fallback_level == "ultra_short" and audio_bytes is None):
+                    if gTTS:
+                        st.toast("⚠️ Premium-Stimme blockiert komplett. Wechsle auf Backup-Audiosystem...")
+                        try:
+                            clean_script = audio_script.replace("[serious]", "").replace("[calm]", "").replace("[sighs]", "")
+                            tts = gTTS(text=clean_script, lang='de', slow=False)
+                            fp = BytesIO()
+                            tts.write_to_fp(fp)
+                            audio_bytes = fp.getvalue()
+                            audio_format = "audio/mp3"
+                        except Exception as fallback_error:
+                            st.error(f"Komplettausfall des Audiosystems: {fallback_error}")
             
             st.markdown("---")
             
-            # --- AUDIO PLAYER ---
-            st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
+            # --- AUDIO PLAYER HEADLINE ANPASSUNG ---
+            if audio_format == "audio/mp3":
+                st.markdown("### 🎧 Dispatch Audio (Backup-Roboterstimme aktiv)")
+            elif fallback_level == "ultra_short_success":
+                st.markdown("### 🎧 Dispatch Audio (⚠️ Krise: Ultra-Short Warning aktiv)")
+            else:
+                st.markdown("### 🎧 Native Dispatch Audio (Powered by Gemini TTS)")
+                
             if audio_bytes:
-                st.audio(audio_bytes, format="audio/wav")
+                st.audio(audio_bytes, format=audio_format)
                 with st.expander("Regie-Skript mitlesen (Denglish & SSML)"):
                     st.write(audio_script)
             else:
-                st.warning("Audiospur konnte aufgrund einer Serverüberlastung nicht generiert werden.")
+                st.warning("Audiospur konnte im Moment nicht generiert werden.")
 
             # --- TABS ---
             t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
