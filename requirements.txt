@@ -2,4 +2,3 @@ streamlit
 requests
 google-genai
 duckduckgo-search
-google-cloud-texttospeech
