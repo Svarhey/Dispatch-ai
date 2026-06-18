@@ -173,13 +173,16 @@ st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
 st.title("✈️ Dispatch-AI")
 st.subheader("Professional AI-Powered Pre-Flight Briefing")
 
+# Die Dual-Key Sicherheitsabfrage
 gemini_key = st.secrets.get("GEMINI_API_KEY")
+gcp_key = st.secrets.get("GCP_API_KEY")
 rapid_key = st.secrets.get("RAPIDAPI_KEY")
 
-if not gemini_key:
-    st.error("🔒 Bitte hinterlege den GEMINI_API_KEY in den Streamlit Secrets.")
+if not gemini_key or not gcp_key:
+    st.error("🔒 Bitte hinterlege GEMINI_API_KEY und GCP_API_KEY in den Streamlit Secrets.")
     st.stop()
 
+# Das Gemini Gehirn initialisieren
 client = genai.Client(api_key=gemini_key)
 
 col_fn, col_date = st.columns(2)
@@ -233,7 +236,6 @@ if st.button("Executive Briefing erstellen"):
             OSINT: {combined_osint}
             """
             
-            # Neues Prompt für die Cloud TTS Stimme
             prompt_audio = f"""
             Schreibe ein kurzes Radioskript für eine professionelle TTS-Stimme. Du rufst die Crew als Dispatcher kurz an.
             Tonfall: Kollegial, kompetent. Keine Einleitung, starte direkt mit dem Flug. Keine Formatierung, kein Markdown. Keine Regie-Tags (wie [calm] oder [serious]), nur reiner Text!
@@ -252,22 +254,22 @@ if st.button("Executive Briefing erstellen"):
             """
             
             with st.spinner('🧠 Generiere Text-Briefing und Cloud Audio...'):
-                # 1. Text Briefing generieren
+                # 1. Text Briefing generieren (Brain)
                 response_text = client.models.generate_content(
                     model='gemini-3.5-flash', contents=prompt_text
                 )
                 briefing_text = response_text.text
                 
-                # 2. Audio Skript schreiben
+                # 2. Audio Skript schreiben (Brain)
                 response_audio = client.models.generate_content(
                     model='gemini-3.5-flash', contents=prompt_audio
                 )
                 audio_script = response_audio.text
                 
-                # 3. Cloud TTS Audio Generierung (Stabilste Enterprise API)
+                # 3. Cloud TTS Audio Generierung (Die neue Funkzentrale mit dem GCP Key)
                 audio_bytes = None
                 try:
-                    tts_url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={gemini_key}"
+                    tts_url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={gcp_key}"
                     tts_payload = {
                         "input": {"text": audio_script},
                         "voice": {"languageCode": "de-DE", "name": "de-DE-Neural2-F"},
