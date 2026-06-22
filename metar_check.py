@@ -182,7 +182,7 @@ def render_briefing_ui(data):
     st.markdown("---")
     
     # --- AUDIO PLAYER HEADLINE ---
-    if data["audio_format"] == "audio/mp3":
+    if data["audio_format"] == "audio/mp3" and data.get("fallback_level") == "gtts":
         st.markdown("### 🎧 Dispatch Audio (Backup-Roboterstimme aktiv)")
     elif data.get("fallback_level") == "ultra_short_success":
         st.markdown("### 🎧 Dispatch Audio (⚠️ Krise: Ultra-Short Warning aktiv)")
@@ -348,8 +348,11 @@ else:
                                 audio_bytes = base64.b64decode(audio_content)
                         else:
                             fallback_level = "gtts"
-                    except Exception:
+                            # HIER WURDE DER FEHLER VORHER VERSCHWIEGEN: Diagnoseausgabe aktiviert!
+                            st.error(f"⚠️ Diagnose: Google Cloud TTS lehnte die Anfrage ab. HTTP {tts_res.status_code} - {tts_res.text}")
+                    except Exception as e:
                         fallback_level = "gtts"
+                        st.error(f"⚠️ Diagnose: Verbindungsfehler zu Google Cloud TTS: {e}")
                         
                     # Letzte Fallback-Instanz
                     if fallback_level == "gtts" and gTTS:
