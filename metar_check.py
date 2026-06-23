@@ -1,3 +1,4 @@
+```python
 import time
 import requests
 import streamlit as st
@@ -46,7 +47,7 @@ def get_airport_city(icao_code):
         pass
     return ""
 
-# --- TRACKING & DEEP DATA API ---
+# --- TRACKING & DEEP DATA API (5 MINUTEN CACHE) ---
 @st.cache_data(ttl=300)
 def fetch_deep_flight_data(flight_number, flight_date, api_key):
     flight_clean = flight_number.replace(" ", "").upper()
@@ -65,7 +66,7 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
             headers=headers, timeout=10
         )
         if res.status_code != 200 or len(res.json()) == 0: 
-            return {"success": False, "error": "Flug nicht gefunden."}
+            return {"success": False, "error": f"Flug {flight_clean} nicht gefunden."}
         
         f_data = res.json()[0]
         result["raw_flight"] = f_data
@@ -74,7 +75,7 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
         reg = f_data.get("aircraft", {}).get("reg")
         
         if not dep or not dest: 
-            return {"success": False, "error": "Keine Route."}
+            return {"success": False, "error": f"Keine Route für {flight_clean}."}
             
         result["success"] = True
         
@@ -178,7 +179,7 @@ def get_airport_raw_data(icao_code, label, all_runways):
 
 # --- ZENTRALE RENDER-FUNKTION FÜR DAS BRIEFING ---
 def render_briefing_ui(data):
-    st.success(f"✈️ Flugplan aktiv: {data['dep_icao']} ➡️ {data['dest_icao']} | Aircraft Tail: {data['reg']}")
+    st.success(f"✈️ Flugplan aktiv: {data['route_string']} | Aircraft Tail: {data['reg']}")
     st.markdown("---")
     
     # --- AUDIO PLAYER HEADLINE ---
@@ -197,15 +198,15 @@ def render_briefing_ui(data):
         st.warning("Audiospur konnte nicht generiert werden.")
 
     # --- TABS ---
-    t1, t2, t3, t4 = st.tabs(["🤖 AI Executive Briefing", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Flugzeug & OSINT-Daten"])
+    t1, t2, t3, t4 = st.tabs(["🤖 AI Duty-Briefing (Multi-Leg)", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Telemetrie & API"])
     t1.markdown(data["briefing_text"])
     t2.code(data["all_w"], language="text")
     t3.code(data["all_n"], language="text")
     with t4:
         st.markdown("### 🌐 Live OSINT City Security & Events")
         st.code(data["combined_osint"], language="text")
-        st.markdown("### ✈️ Telemetrie & API-JSON (AeroDataBox)")
-        st.json(data["deep_data"])
+        st.markdown("### ✈️ Rohdaten AeroDataBox")
+        st.json(data["deep_data_list"])
 
 # --- STREAMLIT UI INIT ---
 st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
@@ -219,12 +220,11 @@ with st.sidebar:
     st.header("🗂️ Dispatch Log")
     st.write("Schnellzugriff auf archivierte Briefings (Lokal im Cache gespeichert).")
     
-    # Dropdown Auswahl erstellen
     options = ["📝 Neues Briefing erstellen"] + [h["display_name"] for h in st.session_state.history]
     view_mode = st.radio("Modus auswählen:", options)
 
 st.title("✈️ Dispatch-AI")
-st.subheader("Professional AI-Powered Pre-Flight Briefing")
+st.subheader("Professional AI-Powered Duty-Briefing (Multi-Leg)")
 
 # Die Dual-Key Sicherheitsabfrage
 gemini_key = st.secrets.get("GEMINI_API_KEY")
@@ -240,17 +240,22 @@ client = genai.Client(api_key=gemini_key)
 
 # --- LOGIK: NEUES BRIEFING VS. HISTORY ---
 if view_mode != "📝 Neues Briefing erstellen":
-    # Ein historisches Briefing wurde ausgewählt
     st.info("🕒 **Archiv-Ansicht:** Dieses Briefing wurde aus dem lokalen Cache geladen. Es werden keine neuen API-Aufrufe getätigt.")
-    # Das entsprechende Dictionary aus der Liste fischen
     selected_data = next(item for item in st.session_state.history if item["display_name"] == view_mode)
     render_briefing_ui(selected_data)
 
 else:
     # --- MODUS: NEUES BRIEFING ERSTELLEN ---
-    col_fn, col_date = st.columns(2)
-    flight_input = col_fn.text_input("Flugnummer (z.B. LH94):", placeholder="LH94").upper()
-    flight_date = col_date.date_input("Flugdatum:", datetime.now().date())
+    st.markdown("Gib bis zu 5 Flugnummern in chronologischer Reihenfolge ein, um ein fortlaufendes Briefing für den gesamten Arbeitstag zu erstellen.")
+    
+    cols = st.columns(5)
+    flight_inputs = []
+    for i in range(5):
+        f_in = cols[i].text_input(f"Leg {i+1} (z.B. LH149):", key=f"leg_input_{i}").upper().strip()
+        if f_in:
+            flight_inputs.append(f_in)
+            
+    flight_date = st.date_input("Flugdatum:", datetime.now().date())
 
     with st.expander("➕ Optionale Alternates hinzufügen"):
         a1, a2, a3, a4 = st.columns(4)
@@ -261,74 +266,130 @@ else:
             a4.text_input("ALTN 4", key="a4").upper()
         ]
 
-    if st.button("Executive Briefing erstellen"):
-        if flight_input:
+    if st.button("Duty-Briefing erstellen"):
+        if not flight_inputs:
+            st.warning("Bitte gib mindestens eine Flugnummer ein.")
+        else:
             all_runways = load_runway_database()
-            deep_data = fetch_deep_flight_data(flight_input, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
             
-            if deep_data["success"]:
-                f = deep_data["raw_flight"]
-                dep_icao = f.get("departure", {}).get("airport", {}).get("icao")
-                dest_icao = f.get("arrival", {}).get("airport", {}).get("icao")
-                reg = f.get("aircraft", {}).get("reg", "N/A")
+            deep_data_list = []
+            route_airports = []
+            display_flight_names = ", ".join(flight_inputs)
+            reg = "N/A"
+            
+            # 1. Alle Flüge abfragen
+            has_error = False
+            with st.spinner("Lade Telemetriedaten für alle Legs..."):
+                for fn in flight_inputs:
+                    d_data = fetch_deep_flight_data(fn, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
+                    if not d_data["success"]:
+                        st.error(f"Fehler bei {fn}: {d_data['error']}")
+                        has_error = True
+                        break
+                    
+                    deep_data_list.append(d_data)
+                    f_raw = d_data["raw_flight"]
+                    dep_icao = f_raw.get("departure", {}).get("airport", {}).get("icao")
+                    dest_icao = f_raw.get("arrival", {}).get("airport", {}).get("icao")
+                    
+                    if len(route_airports) == 0:
+                        route_airports.append(dep_icao)
+                    elif route_airports[-1] != dep_icao:
+                        st.warning(f"Routen-Warnung: Ankunft von vorherigem Leg passt nicht zum Abflug von {fn} ({dep_icao}).")
+                        route_airports.append(dep_icao)
+                    
+                    route_airports.append(dest_icao)
+                    
+                    if reg == "N/A" and f_raw.get("aircraft", {}).get("reg"):
+                        reg = f_raw.get("aircraft", {}).get("reg")
+
+            if not has_error:
+                # Formatierung der Route (z.B. EDDN ➡️ EDDF ➡️ LEMD ➡️ EDDF)
+                route_string = " ➡️ ".join(route_airports)
                 current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 
-                dep_city = get_airport_city(dep_icao)
-                dest_city = get_airport_city(dest_icao)
+                # 2. Eindeutige Flughäfen ermitteln (Um APIs zu sparen)
+                unique_airports = list(dict.fromkeys(route_airports + [a for a in altns if a]))
                 
-                dep_osint = search_city_events(dep_city, flight_date)
-                dest_osint = search_city_events(dest_city, flight_date)
-                combined_osint = f"{dep_osint}\n\n{dest_osint}"
+                all_w = ""
+                all_n = ""
+                combined_osint = ""
                 
-                st.info("📡 Scanne weltweite Wetterdatenbänke und FAA NOTAM-Server...")
-                all_w = ""; all_n = ""
-                for code in [dep_icao, dest_icao] + [a for a in altns if a]:
-                    label = "DEP" if code == dep_icao else ("DEST" if code == dest_icao else "ALTN")
-                    w, n = get_airport_raw_data(code, label, all_runways)
-                    all_w += w + "\n"; all_n += n + "\n"
-                    
+                with st.spinner("Scanne weltweite Wetterdatenbänke, OSINT und FAA NOTAM-Server..."):
+                    for code in unique_airports:
+                        if code:
+                            city = get_airport_city(code)
+                            osint_res = search_city_events(city, flight_date)
+                            combined_osint += f"{osint_res}\n\n"
+                            
+                            w, n = get_airport_raw_data(code, "AIRPORT", all_runways)
+                            all_w += w + "\n"
+                            all_n += n + "\n"
+
+                # 3. Der Master-Prompt mit Flottenfilter (A320 LPV Ignoranz)
                 prompt_text = f"""
                 Du bist 'Dispatch-AI'. Aktuelle UTC-Zeit: {current_utc_time}.
-                Erstelle ein schriftliches Executive Pre-Flight Briefing auf Deutsch. Beachte zeitliche Limits (METAR vs TAF). Formatiere Critical Crosswind Alerts zwingend in ROT (:red[...]).
-                Nutze Aviation Denglish (z.B. Runway, Crosswind, Low Vis, Holdings).
+                Erstelle ein schriftliches Executive Duty-Briefing (Multi-Leg) auf Deutsch. 
                 
-                JSON: {deep_data}
+                ROUTING FÜR HEUTE: {route_string}
+                FLÜGE: {display_flight_names}
+                
+                ALLGEMEINE REGELN FÜR MULTI-LEG:
+                1. Gehe die Flughäfen entlang der Route chronologisch durch. Fasse zusammen, was für den Ablauf wichtig ist.
+                2. Formatiere Critical Crosswind Alerts zwingend in ROT (:red[...]).
+                3. Nutze Aviation Denglish (z.B. Runway, Crosswind, Low Vis, Holdings).
+                
+                A320 FLOTTEN-FILTER (EXTREM WICHTIG):
+                Die eingesetzte Flotte ist NICHT für LPV oder SBAS Approaches zugelassen.
+                IGNORIERE alle NOTAMs, die von "LPV suspended", "LPV approach not available", "SBAS" oder "GLS" handeln. Filtere diese komplett aus deinem Text heraus, da sie für diese Crew irrelevant sind!
+                
+                ZEITGEBUNDENE NOTAMs & VERSPÄTUNGEN (DELAY WARNING):
+                Im JSON ('deep_data_list') findest du die 'scheduledTimeUtc' (Geplante Ankunft). 
+                Prüfe die Gültigkeitszeiten der NOTAMs. Wenn ein kritisches NOTAM (z.B. Runway Closure, ILS U/S) erst NACH unserer planmäßigen Ankunftszeit aktiv wird:
+                - Berechne KEINE genauen Minuten/Stunden-Differenzen (Gefahr von Rechenfehlern!).
+                - Setze stattdessen eine deutliche Warnung: "⚠️ ACHTUNG: [NOTAM-Inhalt] aktiv ab [Uhrzeit]Z. Bei Verspätung zwingend prüfen!"
+                
+                DIE "DELTA-REGEL" FÜR RÜCKFLÜGE:
+                Wenn ein Flughafen auf der Route ZUM ZWEITEN MAL (oder öfter) angeflogen wird:
+                - WETTER: Briefe das Wetter für den späteren Zeitpunkt als ÄNDERUNG (Delta) zum Vormittag.
+                - NOTAMs: Ignoriere Standard-NOTAMs beim zweiten Besuch. ABER: Wiederhole zwingend kurz alle kritischen "Killer-NOTAMs" (Gesperrte Runways, geschlossene Taxiways) als "Reminder".
+                
+                ROHDATEN ALLER STATIONEN:
                 WETTER: {all_w}
                 NOTAM: {all_n}
                 OSINT: {combined_osint}
+                JSON-DATEN (inkl. Zeiten): {deep_data_list}
                 """
                 
                 prompt_audio = f"""
-                Schreibe ein kurzes Radioskript für eine professionelle TTS-Stimme. Du rufst die Crew als Dispatcher kurz an.
-                Tonfall: Kollegial, kompetent. Keine Einleitung, starte direkt mit dem Flug. Keine Formatierung, kein Markdown. Keine Regie-Tags, nur reiner Text!
-                Zahlen zwingend als englische Wörter ausschreiben (two five zero, etc.).
+                Schreibe ein Radioskript für eine professionelle TTS-Stimme. Du rufst die Crew kurz an, um das Multi-Leg Duty-Briefing durchzugeben.
+                Routing heute: {route_string}.
+                Tonfall: Kollegial, kompetent. Keine Formatierung, keine Regie-Tags.
+                Zahlen zwingend als englische Wörter ausschreiben (two five zero).
 
-                STRENGE FILTERREGELN FÜR GEZIELTES WEGLASSEN (NORMAL OPS OMISSION):
-                1. WEATHER: Wenn für das Zeitfenster (+/-1h) der Wind 10 Knoten oder schwächer ist, die Sichtweite 5000 Meter oder mehr beträgt UND keine Phänomene gemeldet sind, sage NUR: "Wetter ist unauffällig."
-                2. NOTAMs: Erwähne NUR signifikante operative Einschränkungen: Runway oder Taxiway closures, sowie suspended oder downgraded approach procedures.
-                3. LOGISTICS / EVENTS: Wenn keine signifikanten Events anstehen, schweige das Thema komplett tot.
-                4. DELAYS / TRAFFIC: Ohne konkrete Slots oder Holdings, erwähne dieses Thema nicht.
+                MULTI-LEG FILTERREGELN (NORMAL OPS OMISSION):
+                1. Fasse die Route im ersten Satz kurz zusammen.
+                2. WEATHER: Ist das Wetter an einer Station gut (Wind <=10kt, Vis >=5000m, keine Phänomene), sage nur: "Wetter in [Station] ist unauffällig."
+                3. DELTA FÜR RETURN-FLIGHTS: Kommt die Crew an einen Airport zurück, fasse dich extrem kurz: Nenne nur Wetterverschlechterungen und setze einen Reminder für geschlossene Runways/Taxiways.
+                4. NOTAMs: Generell NUR Runways/Taxiway Closures oder ILS Ausfälle erwähnen. 
+                5. A320 FLOTTEN-FILTER: Erwähne UNTER KEINEN UMSTÄNDEN Ausfälle von "LPV approaches", "SBAS" oder "GLS". Das Flugzeug kann diese ohnehin nicht fliegen. Verschweige diese NOTAMs strikt!
+                6. DELAY-WARNING: Wenn ein NOTAM laut JSON erst nach der geplanten Ankunft aktiv wird, rechne NICHTS aus! Sage einfach: "[NOTAM] ist ab [Uhrzeit] Zulu aktiv. Im Falle einer Verspätung bitte das schriftliche Briefing prüfen."
                 
-                JSON: {deep_data}
+                ROHDATEN:
                 WETTER: {all_w}
                 NOTAM: {all_n}
-                OSINT: {combined_osint}
+                JSON-DATEN (inkl. Zeiten): {deep_data_list}
                 """
                 
                 with st.spinner('🧠 Generiere Text-Briefing und Cloud Audio...'):
-                    # 1. Text Briefing
-                    response_text = client.models.generate_content(
-                        model='gemini-3.5-flash', contents=prompt_text
-                    )
+                    # Text & Skript Generierung
+                    response_text = client.models.generate_content(model='gemini-3.5-flash', contents=prompt_text)
                     briefing_text = response_text.text
                     
-                    # 2. Audio Skript
-                    response_audio = client.models.generate_content(
-                        model='gemini-3.5-flash', contents=prompt_audio
-                    )
+                    response_audio = client.models.generate_content(model='gemini-3.5-flash', contents=prompt_audio)
                     audio_script = response_audio.text
                     
-                    # 3. Cloud TTS Audio Generierung
+                    # Audio Generierung (GCP)
                     audio_bytes = None
                     audio_format = "audio/mp3"
                     fallback_level = "primary"
@@ -348,13 +409,12 @@ else:
                                 audio_bytes = base64.b64decode(audio_content)
                         else:
                             fallback_level = "gtts"
-                            # HIER WURDE DER FEHLER VORHER VERSCHWIEGEN: Diagnoseausgabe aktiviert!
                             st.error(f"⚠️ Diagnose: Google Cloud TTS lehnte die Anfrage ab. HTTP {tts_res.status_code} - {tts_res.text}")
                     except Exception as e:
                         fallback_level = "gtts"
                         st.error(f"⚠️ Diagnose: Verbindungsfehler zu Google Cloud TTS: {e}")
                         
-                    # Letzte Fallback-Instanz
+                    # Fallback (Roboter)
                     if fallback_level == "gtts" and gTTS:
                         st.toast("⚠️ Google Cloud API nicht erreichbar. Wechsle auf lokales Backup-System...")
                         try:
@@ -367,10 +427,13 @@ else:
                 
                 # --- DATEN IN DIE HISTORY SPEICHERN ---
                 timestamp = datetime.now().strftime("%H:%M:%S")
+                display_name = f"✈️ {display_flight_names[:15]}... ({timestamp})" if len(display_flight_names) > 15 else f"✈️ {display_flight_names} ({timestamp})"
+                
                 new_entry = {
-                    "display_name": f"✈️ {flight_input} ({flight_date.strftime('%d.%m.')} - {timestamp})",
-                    "dep_icao": dep_icao,
-                    "dest_icao": dest_icao,
+                    "display_name": display_name,
+                    "route_string": route_string,
+                    "dep_icao": route_airports[0],
+                    "dest_icao": route_airports[-1],
                     "reg": reg,
                     "briefing_text": briefing_text,
                     "audio_script": audio_script,
@@ -380,18 +443,19 @@ else:
                     "all_w": all_w,
                     "all_n": all_n,
                     "combined_osint": combined_osint,
-                    "deep_data": deep_data
+                    "deep_data_list": deep_data_list
                 }
                 
-                # Oben in die Liste einfügen und auf 5 begrenzen
                 st.session_state.history.insert(0, new_entry)
                 if len(st.session_state.history) > 5:
                     st.session_state.history = st.session_state.history[:5]
                 
-                # Benutzeroberfläche direkt rendern
                 render_briefing_ui(new_entry)
 
             else:
                 st.error(f"Fehler: {deep_data['error']}")
         else:
             st.warning("Bitte gib eine Flugnummer ein.")
+
+
+```
