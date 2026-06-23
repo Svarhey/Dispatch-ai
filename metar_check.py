@@ -451,7 +451,5 @@ else:
                 
                 render_briefing_ui(new_entry)
 
-            else:
-                st.error(f"Fehler: {deep_data['error']}")
-        else:
-            st.warning("Bitte gib eine Flugnummer ein.")
+
+```
