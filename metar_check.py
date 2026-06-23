@@ -450,6 +450,3 @@ else:
                     st.session_state.history = st.session_state.history[:5]
                 
                 render_briefing_ui(new_entry)
-
-
-```
