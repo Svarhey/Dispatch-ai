@@ -273,19 +273,20 @@ else:
             
             deep_data_list = []
             route_airports = []
-            display_flight_names = ", ".join(flight_inputs)
+            successful_flights = []
             reg = "N/A"
             
             # 1. Alle Flüge abfragen
-            has_error = False
             with st.spinner("Lade Telemetriedaten für alle Legs..."):
                 for fn in flight_inputs:
                     d_data = fetch_deep_flight_data(fn, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
-                    if not d_data["success"]:
-                        st.error(f"Fehler bei {fn}: {d_data['error']}")
-                        has_error = True
-                        break
                     
+                    if not d_data["success"]:
+                        # FEHLERTOLERANZ: Flug wird übersprungen, Warnung ausgegeben
+                        st.warning(f"⚠️ {fn}: Keine Telemetriedaten gefunden. Leg wird übersprungen. ({d_data['error']})")
+                        continue
+                    
+                    successful_flights.append(fn)
                     deep_data_list.append(d_data)
                     f_raw = d_data["raw_flight"]
                     dep_icao = f_raw.get("departure", {}).get("airport", {}).get("icao")
@@ -302,7 +303,8 @@ else:
                     if reg == "N/A" and f_raw.get("aircraft", {}).get("reg"):
                         reg = f_raw.get("aircraft", {}).get("reg")
 
-            if not has_error:
+            if successful_flights:
+                display_flight_names = ", ".join(successful_flights)
                 # Formatierung der Route (z.B. EDDN ➡️ EDDF ➡️ LEMD ➡️ EDDF)
                 route_string = " ➡️ ".join(route_airports)
                 current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -450,3 +452,6 @@ else:
                     st.session_state.history = st.session_state.history[:5]
                 
                 render_briefing_ui(new_entry)
+
+            else:
+                st.error("Für keine der eingegebenen Flugnummern konnten Daten gefunden werden.")
