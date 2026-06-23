@@ -65,7 +65,7 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
             headers=headers, timeout=10
         )
         if res.status_code != 200 or len(res.json()) == 0: 
-            return {"success": False, "error": f"Flug {flight_clean} nicht gefunden."}
+            return {"success": False, "error": f"ATC-Flugplan für {flight_clean} (noch) nicht im System."}
         
         f_data = res.json()[0]
         result["raw_flight"] = f_data
@@ -74,7 +74,7 @@ def fetch_deep_flight_data(flight_number, flight_date, api_key):
         reg = f_data.get("aircraft", {}).get("reg")
         
         if not dep or not dest: 
-            return {"success": False, "error": f"Keine Route für {flight_clean}."}
+            return {"success": False, "error": f"Routing unvollständig."}
             
         result["success"] = True
         
@@ -181,7 +181,6 @@ def render_briefing_ui(data):
     st.success(f"✈️ Flugplan aktiv: {data['route_string']} | Aircraft Tail: {data['reg']}")
     st.markdown("---")
     
-    # --- AUDIO PLAYER HEADLINE ---
     if data["audio_format"] == "audio/mp3" and data.get("fallback_level") == "gtts":
         st.markdown("### 🎧 Dispatch Audio (Backup-Roboterstimme aktiv)")
     elif data.get("fallback_level") == "ultra_short_success":
@@ -196,7 +195,6 @@ def render_briefing_ui(data):
     else:
         st.warning("Audiospur konnte nicht generiert werden.")
 
-    # --- TABS ---
     t1, t2, t3, t4 = st.tabs(["🤖 AI Duty-Briefing (Multi-Leg)", "🌤️ Wetter-Rohdaten", "📋 NOTAM-Rohdaten", "✈️ Telemetrie & API"])
     t1.markdown(data["briefing_text"])
     t2.code(data["all_w"], language="text")
@@ -210,22 +208,18 @@ def render_briefing_ui(data):
 # --- STREAMLIT UI INIT ---
 st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
 
-# Initialisierung des Session State für die History (Letzte 5 Briefings)
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# --- SIDEBAR HISTORY MENU ---
 with st.sidebar:
     st.header("🗂️ Dispatch Log")
-    st.write("Schnellzugriff auf archivierte Briefings (Lokal im Cache gespeichert).")
-    
+    st.write("Schnellzugriff auf archivierte Briefings.")
     options = ["📝 Neues Briefing erstellen"] + [h["display_name"] for h in st.session_state.history]
     view_mode = st.radio("Modus auswählen:", options)
 
 st.title("✈️ Dispatch-AI")
 st.subheader("Professional AI-Powered Duty-Briefing (Multi-Leg)")
 
-# Die Dual-Key Sicherheitsabfrage
 gemini_key = st.secrets.get("GEMINI_API_KEY")
 gcp_key = st.secrets.get("GCP_API_KEY")
 rapid_key = st.secrets.get("RAPIDAPI_KEY")
@@ -234,18 +228,15 @@ if not gemini_key or not gcp_key:
     st.error("🔒 Bitte hinterlege GEMINI_API_KEY und GCP_API_KEY in den Streamlit Secrets.")
     st.stop()
 
-# Das Gemini Gehirn initialisieren
 client = genai.Client(api_key=gemini_key)
 
-# --- LOGIK: NEUES BRIEFING VS. HISTORY ---
 if view_mode != "📝 Neues Briefing erstellen":
-    st.info("🕒 **Archiv-Ansicht:** Dieses Briefing wurde aus dem lokalen Cache geladen. Es werden keine neuen API-Aufrufe getätigt.")
+    st.info("🕒 **Archiv-Ansicht:** Dieses Briefing wurde aus dem lokalen Cache geladen.")
     selected_data = next(item for item in st.session_state.history if item["display_name"] == view_mode)
     render_briefing_ui(selected_data)
 
 else:
-    # --- MODUS: NEUES BRIEFING ERSTELLEN ---
-    st.markdown("Gib bis zu 5 Flugnummern in chronologischer Reihenfolge ein, um ein fortlaufendes Briefing für den gesamten Arbeitstag zu erstellen.")
+    st.markdown("Gib bis zu 5 Flugnummern in chronologischer Reihenfolge ein.")
     
     cols = st.columns(5)
     flight_inputs = []
@@ -255,6 +246,11 @@ else:
             flight_inputs.append(f_in)
             
     flight_date = st.date_input("Flugdatum:", datetime.now().date())
+    
+    # --- MANUELLES RETTUNGSNETZ ---
+    st.markdown("---")
+    st.markdown("**Notfall-Routing (Falls ATC-Plan fehlt):**")
+    manual_route = st.text_input("Wenn die API Flüge nicht findet (z.B. später Rückflug), gib hier fehlende Airports ein (z.B. 'EDDF LEMD EDDF'):", placeholder="ICAO Codes mit Leerzeichen trennen")
 
     with st.expander("➕ Optionale Alternates hinzufügen"):
         a1, a2, a3, a4 = st.columns(4)
@@ -266,8 +262,8 @@ else:
         ]
 
     if st.button("Duty-Briefing erstellen"):
-        if not flight_inputs:
-            st.warning("Bitte gib mindestens eine Flugnummer ein.")
+        if not flight_inputs and not manual_route:
+            st.warning("Bitte gib mindestens eine Flugnummer oder ein Notfall-Routing ein.")
         else:
             all_runways = load_runway_database()
             
@@ -276,14 +272,12 @@ else:
             successful_flights = []
             reg = "N/A"
             
-            # 1. Alle Flüge abfragen
             with st.spinner("Lade Telemetriedaten für alle Legs..."):
                 for fn in flight_inputs:
                     d_data = fetch_deep_flight_data(fn, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
                     
                     if not d_data["success"]:
-                        # FEHLERTOLERANZ: Flug wird übersprungen, Warnung ausgegeben
-                        st.warning(f"⚠️ {fn}: Keine Telemetriedaten gefunden. Leg wird übersprungen. ({d_data['error']})")
+                        st.warning(f"⚠️ {fn} übersprungen: {d_data['error']} (Nutze das Notfall-Routing-Feld, falls Stationen in der Route fehlen!)")
                         continue
                     
                     successful_flights.append(fn)
@@ -295,7 +289,6 @@ else:
                     if len(route_airports) == 0:
                         route_airports.append(dep_icao)
                     elif route_airports[-1] != dep_icao:
-                        st.warning(f"Routen-Warnung: Ankunft von vorherigem Leg passt nicht zum Abflug von {fn} ({dep_icao}).")
                         route_airports.append(dep_icao)
                     
                     route_airports.append(dest_icao)
@@ -303,13 +296,19 @@ else:
                     if reg == "N/A" and f_raw.get("aircraft", {}).get("reg"):
                         reg = f_raw.get("aircraft", {}).get("reg")
 
-            if successful_flights:
-                display_flight_names = ", ".join(successful_flights)
-                # Formatierung der Route (z.B. EDDN ➡️ EDDF ➡️ LEMD ➡️ EDDF)
+            # Falls Telemetrie komplett fehlschlägt oder manuell ergänzt wurde
+            if manual_route:
+                manual_airports = [code.upper() for code in manual_route.split()]
+                # Füge manuell fehlende Flughäfen hinzu, falls sie nicht schon in der Route sind
+                for ma in manual_airports:
+                    if len(route_airports) == 0 or route_airports[-1] != ma:
+                        route_airports.append(ma)
+
+            if route_airports:
+                display_flight_names = ", ".join(successful_flights) if successful_flights else "Manuelles Routing"
                 route_string = " ➡️ ".join(route_airports)
                 current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 
-                # 2. Eindeutige Flughäfen ermitteln (Um APIs zu sparen)
                 unique_airports = list(dict.fromkeys(route_airports + [a for a in altns if a]))
                 
                 all_w = ""
@@ -327,7 +326,6 @@ else:
                             all_w += w + "\n"
                             all_n += n + "\n"
 
-                # 3. Der Master-Prompt mit Flottenfilter (A320 LPV Ignoranz)
                 prompt_text = f"""
                 Du bist 'Dispatch-AI'. Aktuelle UTC-Zeit: {current_utc_time}.
                 Erstelle ein schriftliches Executive Duty-Briefing (Multi-Leg) auf Deutsch. 
@@ -345,21 +343,20 @@ else:
                 IGNORIERE alle NOTAMs, die von "LPV suspended", "LPV approach not available", "SBAS" oder "GLS" handeln. Filtere diese komplett aus deinem Text heraus, da sie für diese Crew irrelevant sind!
                 
                 ZEITGEBUNDENE NOTAMs & VERSPÄTUNGEN (DELAY WARNING):
-                Im JSON ('deep_data_list') findest du die 'scheduledTimeUtc' (Geplante Ankunft). 
-                Prüfe die Gültigkeitszeiten der NOTAMs. Wenn ein kritisches NOTAM (z.B. Runway Closure, ILS U/S) erst NACH unserer planmäßigen Ankunftszeit aktiv wird:
-                - Berechne KEINE genauen Minuten/Stunden-Differenzen (Gefahr von Rechenfehlern!).
-                - Setze stattdessen eine deutliche Warnung: "⚠️ ACHTUNG: [NOTAM-Inhalt] aktiv ab [Uhrzeit]Z. Bei Verspätung zwingend prüfen!"
+                Im JSON ('deep_data_list') findest du (falls Telemetrie verfügbar) die 'scheduledTimeUtc'. 
+                Wenn ein kritisches NOTAM (z.B. Runway Closure) erst NACH unserer planmäßigen Ankunftszeit aktiv wird:
+                - Setze eine deutliche Warnung: "⚠️ ACHTUNG: [NOTAM-Inhalt] aktiv ab [Uhrzeit]Z. Bei Verspätung zwingend prüfen!"
                 
                 DIE "DELTA-REGEL" FÜR RÜCKFLÜGE:
                 Wenn ein Flughafen auf der Route ZUM ZWEITEN MAL (oder öfter) angeflogen wird:
                 - WETTER: Briefe das Wetter für den späteren Zeitpunkt als ÄNDERUNG (Delta) zum Vormittag.
-                - NOTAMs: Ignoriere Standard-NOTAMs beim zweiten Besuch. ABER: Wiederhole zwingend kurz alle kritischen "Killer-NOTAMs" (Gesperrte Runways, geschlossene Taxiways) als "Reminder".
+                - NOTAMs: Ignoriere Standard-NOTAMs beim zweiten Besuch. ABER: Wiederhole zwingend kurz alle kritischen "Killer-NOTAMs" als "Reminder".
                 
                 ROHDATEN ALLER STATIONEN:
                 WETTER: {all_w}
                 NOTAM: {all_n}
                 OSINT: {combined_osint}
-                JSON-DATEN (inkl. Zeiten): {deep_data_list}
+                JSON-DATEN: {deep_data_list}
                 """
                 
                 prompt_audio = f"""
@@ -373,24 +370,20 @@ else:
                 2. WEATHER: Ist das Wetter an einer Station gut (Wind <=10kt, Vis >=5000m, keine Phänomene), sage nur: "Wetter in [Station] ist unauffällig."
                 3. DELTA FÜR RETURN-FLIGHTS: Kommt die Crew an einen Airport zurück, fasse dich extrem kurz: Nenne nur Wetterverschlechterungen und setze einen Reminder für geschlossene Runways/Taxiways.
                 4. NOTAMs: Generell NUR Runways/Taxiway Closures oder ILS Ausfälle erwähnen. 
-                5. A320 FLOTTEN-FILTER: Erwähne UNTER KEINEN UMSTÄNDEN Ausfälle von "LPV approaches", "SBAS" oder "GLS". Das Flugzeug kann diese ohnehin nicht fliegen. Verschweige diese NOTAMs strikt!
-                6. DELAY-WARNING: Wenn ein NOTAM laut JSON erst nach der geplanten Ankunft aktiv wird, rechne NICHTS aus! Sage einfach: "[NOTAM] ist ab [Uhrzeit] Zulu aktiv. Im Falle einer Verspätung bitte das schriftliche Briefing prüfen."
+                5. A320 FLOTTEN-FILTER: Erwähne UNTER KEINEN UMSTÄNDEN Ausfälle von "LPV approaches", "SBAS" oder "GLS".
                 
                 ROHDATEN:
                 WETTER: {all_w}
                 NOTAM: {all_n}
-                JSON-DATEN (inkl. Zeiten): {deep_data_list}
                 """
                 
                 with st.spinner('🧠 Generiere Text-Briefing und Cloud Audio...'):
-                    # Text & Skript Generierung
                     response_text = client.models.generate_content(model='gemini-3.5-flash', contents=prompt_text)
                     briefing_text = response_text.text
                     
                     response_audio = client.models.generate_content(model='gemini-3.5-flash', contents=prompt_audio)
                     audio_script = response_audio.text
                     
-                    # Audio Generierung (GCP)
                     audio_bytes = None
                     audio_format = "audio/mp3"
                     fallback_level = "primary"
@@ -415,7 +408,6 @@ else:
                         fallback_level = "gtts"
                         st.error(f"⚠️ Diagnose: Verbindungsfehler zu Google Cloud TTS: {e}")
                         
-                    # Fallback (Roboter)
                     if fallback_level == "gtts" and gTTS:
                         st.toast("⚠️ Google Cloud API nicht erreichbar. Wechsle auf lokales Backup-System...")
                         try:
@@ -426,7 +418,6 @@ else:
                         except Exception as fallback_error:
                             st.error(f"Backup-Audiosystem fehlgeschlagen: {fallback_error}")
                 
-                # --- DATEN IN DIE HISTORY SPEICHERN ---
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 display_name = f"✈️ {display_flight_names[:15]}... ({timestamp})" if len(display_flight_names) > 15 else f"✈️ {display_flight_names} ({timestamp})"
                 
@@ -454,4 +445,4 @@ else:
                 render_briefing_ui(new_entry)
 
             else:
-                st.error("Für keine der eingegebenen Flugnummern konnten Daten gefunden werden.")
+                st.error("Routenberechnung fehlgeschlagen. Bitte prüfe die Eingaben.")
