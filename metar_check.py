@@ -198,7 +198,6 @@ def get_airport_raw_data(icao_code, label, all_runways):
 
 # --- ZENTRALE RENDER-FUNKTION FÜR DAS BRIEFING ---
 def render_briefing_ui(data):
-    # Fallback für alte History-Einträge ohne "route_string_display"
     display_route = data.get('route_string_display', data.get('route_string', 'N/A'))
     
     st.success(f"✈️ Flugplan aktiv: {display_route} | Aircraft Tail: {data['reg']}")
@@ -233,12 +232,20 @@ st.set_page_config(page_title="Dispatch-AI", page_icon="✈️", layout="wide")
 
 if "history" not in st.session_state:
     st.session_state.history = []
+if "phase" not in st.session_state:
+    st.session_state.phase = 1
+if "flight_cache" not in st.session_state:
+    st.session_state.flight_cache = {}
+
+# Funktion zum Zurücksetzen des Wizards bei Eingabeänderung
+def reset_phase():
+    st.session_state.phase = 1
 
 with st.sidebar:
     st.header("🗂️ Dispatch Log")
     st.write("Schnellzugriff auf archivierte Briefings.")
     options = ["📝 Neues Briefing erstellen"] + [h["display_name"] for h in st.session_state.history]
-    view_mode = st.radio("Modus auswählen:", options)
+    view_mode = st.radio("Modus auswählen:", options, on_change=reset_phase)
 
 st.title("✈️ Dispatch-AI")
 st.subheader("Professional AI-Powered Duty-Briefing (Multi-Leg)")
@@ -264,68 +271,125 @@ else:
     cols = st.columns(5)
     flight_inputs = []
     for i in range(5):
-        f_in = cols[i].text_input(f"Leg {i+1} (z.B. LH149):", key=f"leg_input_{i}").upper().strip()
+        # Bei Tippen/Ändern wird Phase 1 automatisch neu gestartet
+        f_in = cols[i].text_input(f"Leg {i+1} (z.B. LH149):", key=f"leg_input_{i}", on_change=reset_phase).upper().strip()
         if f_in:
             flight_inputs.append(f_in)
             
-    flight_date = st.date_input("Flugdatum:", datetime.now().date())
+    flight_date = st.date_input("Flugdatum:", datetime.now().date(), on_change=reset_phase)
     
     st.markdown("---")
-    st.markdown("**Notfall-Routing (Falls ATC-Plan fehlt):**")
-    manual_route = st.text_input("Wenn die API Flüge nicht findet (z.B. später Rückflug), gib hier fehlende Airports ein (z.B. 'EDDF LEMD EDDF'):", placeholder="ICAO Codes mit Leerzeichen trennen")
 
-    with st.expander("➕ Optionale Alternates hinzufügen"):
-        a1, a2, a3, a4 = st.columns(4)
-        altns = [
-            a1.text_input("ALTN 1", key="a1").upper(), 
-            a2.text_input("ALTN 2", key="a2").upper(), 
-            a3.text_input("ALTN 3", key="a3").upper(), 
-            a4.text_input("ALTN 4", key="a4").upper()
-        ]
+    # ==========================================
+    # PHASE 1: DATENCHECK (TELEMETRIE PRÜFEN)
+    # ==========================================
+    if st.session_state.phase == 1:
+        if st.button("🔍 Flugdaten prüfen", use_container_width=True):
+            if not flight_inputs:
+                st.warning("Bitte gib mindestens eine Flugnummer ein.")
+            else:
+                deep_data_list = []
+                route_airports = []
+                successful_flights = []
+                status_messages = []
+                reg = "N/A"
+                has_missing = False
+                
+                with st.spinner("Prüfe Telemetrie-Datenbank (AeroDataBox)..."):
+                    for fn in flight_inputs:
+                        d_data = fetch_deep_flight_data(fn, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
+                        
+                        if not d_data["success"]:
+                            status_messages.append({"type": "warning", "text": f"⚠️ {fn}: {d_data['error']}"})
+                            has_missing = True
+                            continue
+                        
+                        successful_flights.append(fn)
+                        deep_data_list.append(d_data)
+                        status_messages.append({"type": "success", "text": f"✅ {fn} gefunden."})
+                        
+                        f_raw = d_data["raw_flight"]
+                        dep_icao = f_raw.get("departure", {}).get("airport", {}).get("icao")
+                        dest_icao = f_raw.get("arrival", {}).get("airport", {}).get("icao")
+                        
+                        if len(route_airports) == 0:
+                            route_airports.append(dep_icao)
+                        elif route_airports[-1] != dep_icao:
+                            route_airports.append(dep_icao)
+                        
+                        route_airports.append(dest_icao)
+                        
+                        if reg == "N/A" and f_raw.get("aircraft", {}).get("reg"):
+                            reg = f_raw.get("aircraft", {}).get("reg")
 
-    if st.button("Duty-Briefing erstellen"):
-        if not flight_inputs and not manual_route:
-            st.warning("Bitte gib mindestens eine Flugnummer oder ein Notfall-Routing ein.")
+                # Daten im Cache speichern und in Phase 2 wechseln
+                st.session_state.flight_cache = {
+                    "deep_data_list": deep_data_list,
+                    "route_airports": route_airports,
+                    "successful_flights": successful_flights,
+                    "reg": reg,
+                    "status_messages": status_messages,
+                    "has_missing": has_missing
+                }
+                st.session_state.phase = 2
+
+    # ==========================================
+    # PHASE 2: KORREKTUR & BRIEFING ERSTELLEN
+    # ==========================================
+    if st.session_state.phase == 2:
+        fc = st.session_state.flight_cache
+        
+        # 1. Status-Meldungen anzeigen
+        st.markdown("### 📊 API Status-Check")
+        for msg in fc["status_messages"]:
+            if msg["type"] == "success":
+                st.success(msg["text"])
+            else:
+                st.warning(msg["text"])
+
+        # 2. Rettungsnetz für fehlende Routen (Intelligente Anzeige)
+        manual_route = ""
+        if fc["has_missing"]:
+            st.error("💡 **Aktion erforderlich:** Einer oder mehrere ATC-Flugpläne fehlen. Bitte fülle die Lücke auf, damit die Route nicht abreißt.")
+            manual_route = st.text_input("Notfall-Routing (z.B. 'LEMD EDDF'):", placeholder="Fehlende ICAO Codes mit Leerzeichen trennen")
         else:
+            with st.expander("🛠️ Manuelles Routing ergänzen (Optional)"):
+                manual_route = st.text_input("Zusätzliche Flughäfen (z.B. 'LEMD EDDF'):", placeholder="ICAO Codes mit Leerzeichen trennen")
+
+        with st.expander("➕ Optionale Alternates hinzufügen"):
+            a1, a2, a3, a4 = st.columns(4)
+            altns = [
+                a1.text_input("ALTN 1", key="a1").upper(), 
+                a2.text_input("ALTN 2", key="a2").upper(), 
+                a3.text_input("ALTN 3", key="a3").upper(), 
+                a4.text_input("ALTN 4", key="a4").upper()
+            ]
+
+        # 3. Der große Finale-Button
+        col_btn1, col_btn2 = st.columns([3, 1])
+        with col_btn1:
+            start_briefing = st.button("🛫 Duty-Briefing erstellen", use_container_width=True)
+        with col_btn2:
+            if st.button("🔄 Reset", use_container_width=True):
+                reset_phase()
+                st.rerun()
+
+        if start_briefing:
             all_runways = load_runway_database()
             
-            deep_data_list = []
-            route_airports = []
-            successful_flights = []
-            reg = "N/A"
+            # Aus dem Cache laden und Route verarbeiten
+            route_airports = fc["route_airports"].copy()
             
-            with st.spinner("Lade Telemetriedaten für alle Legs..."):
-                for fn in flight_inputs:
-                    d_data = fetch_deep_flight_data(fn, flight_date, rapid_key) if rapid_key else {"success": False, "error": "Kein API Key"}
-                    
-                    if not d_data["success"]:
-                        st.warning(f"⚠️ {fn} übersprungen: {d_data['error']} (Nutze das Notfall-Routing-Feld, falls Stationen in der Route fehlen!)")
-                        continue
-                    
-                    successful_flights.append(fn)
-                    deep_data_list.append(d_data)
-                    f_raw = d_data["raw_flight"]
-                    dep_icao = f_raw.get("departure", {}).get("airport", {}).get("icao")
-                    dest_icao = f_raw.get("arrival", {}).get("airport", {}).get("icao")
-                    
-                    if len(route_airports) == 0:
-                        route_airports.append(dep_icao)
-                    elif route_airports[-1] != dep_icao:
-                        route_airports.append(dep_icao)
-                    
-                    route_airports.append(dest_icao)
-                    
-                    if reg == "N/A" and f_raw.get("aircraft", {}).get("reg"):
-                        reg = f_raw.get("aircraft", {}).get("reg")
-
             if manual_route:
                 manual_airports = [code.upper() for code in manual_route.split()]
                 for ma in manual_airports:
                     if len(route_airports) == 0 or route_airports[-1] != ma:
                         route_airports.append(ma)
 
-            if route_airports:
-                display_flight_names = ", ".join(successful_flights) if successful_flights else "Manuelles Routing"
+            if not route_airports:
+                st.error("Routenberechnung fehlgeschlagen. Bitte prüfe die Eingaben oder gib ein Notfall-Routing ein.")
+            else:
+                display_flight_names = ", ".join(fc["successful_flights"]) if fc["successful_flights"] else "Manuelles Routing"
                 route_string = " ➡️ ".join(route_airports)
                 current_utc_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 
@@ -384,7 +448,7 @@ else:
                 WETTER: {all_w}
                 NOTAM: {all_n}
                 OSINT: {combined_osint}
-                JSON-DATEN: {deep_data_list}
+                JSON-DATEN: {fc['deep_data_list']}
                 """
                 
                 prompt_audio = f"""
@@ -403,12 +467,11 @@ else:
                 ROHDATEN:
                 WETTER: {all_w}
                 NOTAM: {all_n}
-                JSON-DATEN (inkl. Zeiten): {deep_data_list}
+                JSON-DATEN (inkl. Zeiten): {fc['deep_data_list']}
                 """
                 
                 with st.spinner('🧠 Generiere Text-Briefing und Cloud Audio...'):
                     try:
-                        # Aufruf mit der neuen Retry-Funktion!
                         response_text = generate_with_retry(client, 'gemini-3.5-flash', prompt_text)
                         briefing_text = response_text.text
                         
@@ -459,10 +522,10 @@ else:
                 new_entry = {
                     "display_name": display_name,
                     "route_string": route_string,
-                    "route_string_display": route_string_display, # NEU: Für das UI gespeichert
+                    "route_string_display": route_string_display,
                     "dep_icao": route_airports[0],
                     "dest_icao": route_airports[-1],
-                    "reg": reg,
+                    "reg": fc["reg"],
                     "briefing_text": briefing_text,
                     "audio_script": audio_script,
                     "audio_bytes": audio_bytes,
@@ -471,7 +534,7 @@ else:
                     "all_w": all_w,
                     "all_n": all_n,
                     "combined_osint": combined_osint,
-                    "deep_data_list": deep_data_list
+                    "deep_data_list": fc["deep_data_list"]
                 }
                 
                 st.session_state.history.insert(0, new_entry)
@@ -479,6 +542,3 @@ else:
                     st.session_state.history = st.session_state.history[:5]
                 
                 render_briefing_ui(new_entry)
-
-            else:
-                st.error("Routenberechnung fehlgeschlagen. Bitte prüfe die Eingaben.")
