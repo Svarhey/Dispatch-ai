@@ -21,6 +21,17 @@ try:
 except ImportError:
     gTTS = None
 
+# --- GLOBALE RETRY FUNKTION FÜR GEMINI SERVER ERRORS ---
+def generate_with_retry(client, model_name, contents, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return client.models.generate_content(model=model_name, contents=contents)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))  # Exponential Backoff: 2s, 4s...
+            else:
+                raise e
+
 # --- RUNWAY & AIRPORT DATENBANK ---
 @st.cache_data(ttl=86400)
 def load_runway_database():
@@ -121,11 +132,12 @@ def search_city_events(city_name, flight_date):
         pass
     return f"Keine lokalen Großereignisse für {city_name} detektiert."
 
-# --- METAR / TAF / NOTAM SAMMLER ---
+# --- METAR / TAF / NOTAM SAMMLER INKL. AMPELSYSTEM ---
 def get_airport_raw_data(icao_code, label, all_runways):
     weather_info = f"--- {label}: {icao_code.upper()} ---\n"
     notam_info = f"--- {label}: {icao_code.upper()} ---\n"
     wdir, wspd, metar_raw = None, None, ""
+    indicator = "⚪" # Default: Keine Daten
     
     try:
         metar_res = requests.get(f"https://aviationweather.gov/api/data/metar?ids={icao_code}&format=json").json()
@@ -135,6 +147,14 @@ def get_airport_raw_data(icao_code, label, all_runways):
             weather_info += f"METAR: {metar_raw}\n"
             wdir = metar_res[0].get("wdir")
             wspd = metar_res[0].get("wspd")
+            
+            # --- AMPELSYSTEM LOGIK (Flight Category) ---
+            cat = metar_res[0].get('fltcat', '')
+            if cat == 'VFR': indicator = "🟢"
+            elif cat == 'MVFR': indicator = "🟡"
+            elif cat == 'IFR': indicator = "🟠"
+            elif cat == 'LIFR': indicator = "🔴"
+
         if taf_res: 
             weather_info += f"TAF: {taf_res[0].get('rawTAF')}\n"
     except: 
@@ -174,11 +194,14 @@ def get_airport_raw_data(icao_code, label, all_runways):
     except: 
         notam_info += "NOTAMs temporär nicht verfügbar.\n"
         
-    return weather_info, notam_info
+    return weather_info, notam_info, indicator
 
 # --- ZENTRALE RENDER-FUNKTION FÜR DAS BRIEFING ---
 def render_briefing_ui(data):
-    st.success(f"✈️ Flugplan aktiv: {data['route_string']} | Aircraft Tail: {data['reg']}")
+    # Fallback für alte History-Einträge ohne "route_string_display"
+    display_route = data.get('route_string_display', data.get('route_string', 'N/A'))
+    
+    st.success(f"✈️ Flugplan aktiv: {display_route} | Aircraft Tail: {data['reg']}")
     st.markdown("---")
     
     if data["audio_format"] == "audio/mp3" and data.get("fallback_level") == "gtts":
@@ -247,7 +270,6 @@ else:
             
     flight_date = st.date_input("Flugdatum:", datetime.now().date())
     
-    # --- MANUELLES RETTUNGSNETZ ---
     st.markdown("---")
     st.markdown("**Notfall-Routing (Falls ATC-Plan fehlt):**")
     manual_route = st.text_input("Wenn die API Flüge nicht findet (z.B. später Rückflug), gib hier fehlende Airports ein (z.B. 'EDDF LEMD EDDF'):", placeholder="ICAO Codes mit Leerzeichen trennen")
@@ -296,10 +318,8 @@ else:
                     if reg == "N/A" and f_raw.get("aircraft", {}).get("reg"):
                         reg = f_raw.get("aircraft", {}).get("reg")
 
-            # Falls Telemetrie komplett fehlschlägt oder manuell ergänzt wurde
             if manual_route:
                 manual_airports = [code.upper() for code in manual_route.split()]
-                # Füge manuell fehlende Flughäfen hinzu, falls sie nicht schon in der Route sind
                 for ma in manual_airports:
                     if len(route_airports) == 0 or route_airports[-1] != ma:
                         route_airports.append(ma)
@@ -314,6 +334,7 @@ else:
                 all_w = ""
                 all_n = ""
                 combined_osint = ""
+                airport_indicators = {}
                 
                 with st.spinner("Scanne weltweite Wetterdatenbänke, OSINT und FAA NOTAM-Server..."):
                     for code in unique_airports:
@@ -322,9 +343,16 @@ else:
                             osint_res = search_city_events(city, flight_date)
                             combined_osint += f"{osint_res}\n\n"
                             
-                            w, n = get_airport_raw_data(code, "AIRPORT", all_runways)
+                            w, n, ind = get_airport_raw_data(code, "AIRPORT", all_runways)
                             all_w += w + "\n"
                             all_n += n + "\n"
+                            airport_indicators[code] = ind
+
+                # Formatierte Route inkl. Ampelsystem für die Anzeige generieren
+                route_with_indicators = []
+                for apt in route_airports:
+                    route_with_indicators.append(f"{apt} {airport_indicators.get(apt, '⚪')}")
+                route_string_display = " ➡️ ".join(route_with_indicators)
 
                 prompt_text = f"""
                 Du bist 'Dispatch-AI'. Aktuelle UTC-Zeit: {current_utc_time}.
@@ -375,14 +403,21 @@ else:
                 ROHDATEN:
                 WETTER: {all_w}
                 NOTAM: {all_n}
+                JSON-DATEN (inkl. Zeiten): {deep_data_list}
                 """
                 
                 with st.spinner('🧠 Generiere Text-Briefing und Cloud Audio...'):
-                    response_text = client.models.generate_content(model='gemini-3.5-flash', contents=prompt_text)
-                    briefing_text = response_text.text
-                    
-                    response_audio = client.models.generate_content(model='gemini-3.5-flash', contents=prompt_audio)
-                    audio_script = response_audio.text
+                    try:
+                        # Aufruf mit der neuen Retry-Funktion!
+                        response_text = generate_with_retry(client, 'gemini-3.5-flash', prompt_text)
+                        briefing_text = response_text.text
+                        
+                        response_audio = generate_with_retry(client, 'gemini-3.5-flash', prompt_audio)
+                        audio_script = response_audio.text
+                        
+                    except Exception as e:
+                        st.error(f"⚠️ Abbruch: Google Gemini API ServerError nach mehreren Versuchen. Server überlastet. Detail: {e}")
+                        st.stop()
                     
                     audio_bytes = None
                     audio_format = "audio/mp3"
@@ -424,6 +459,7 @@ else:
                 new_entry = {
                     "display_name": display_name,
                     "route_string": route_string,
+                    "route_string_display": route_string_display, # NEU: Für das UI gespeichert
                     "dep_icao": route_airports[0],
                     "dest_icao": route_airports[-1],
                     "reg": reg,
